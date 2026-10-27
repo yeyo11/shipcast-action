@@ -1,0 +1,55 @@
+# Shipcast, in the launches repo (written by `npx @yeyo11/shipcast init`).
+#
+# When a drafts pull request (launch/*) is merged, Shipcast publishes that launch to every channel its
+# launch.yml turns on, once the article is live. Every hour it also publishes what is due (a scheduled
+# piece, a channel to retry). A channel without its secrets is not published to.
+#
+# Secrets: SHIPCAST_GITHUB_TOKEN (this workflow's own token is the fallback), and each channel's.
+# Variables (optional): SHIPCAST_DRY_RUN=true lists what would be posted and posts nothing.
+name: Shipcast publish
+
+on:
+  pull_request:
+    types: [closed]
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: List what would be published; nothing is posted or saved
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: shipcast-${{ github.event.pull_request.number || 'round' }}
+  cancel-in-progress: false
+
+permissions:
+  # The launch registry lives on this repo's shipcast-state branch
+  contents: write
+  pull-requests: read
+
+jobs:
+  publish:
+    if: github.event_name != 'pull_request' || (github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'launch/'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: yeyo11/shipcast-action@v1
+        with:
+          command: ${{ github.event_name == 'pull_request' && 'publish' || 'round' }}
+          launches-repo: ${{ github.repository }}
+          github-token: ${{ secrets.SHIPCAST_GITHUB_TOKEN || github.token }}
+          dry-run: ${{ inputs.dry-run == true || vars.SHIPCAST_DRY_RUN == 'true' }}
+        env:
+          DEVTO_API_KEY: ${{ secrets.DEVTO_API_KEY }}
+          BLUESKY_HANDLE: ${{ secrets.BLUESKY_HANDLE }}
+          BLUESKY_APP_PASSWORD: ${{ secrets.BLUESKY_APP_PASSWORD }}
+          MASTODON_INSTANCE: ${{ secrets.MASTODON_INSTANCE }}
+          MASTODON_ACCESS_TOKEN: ${{ secrets.MASTODON_ACCESS_TOKEN }}
+          HASHNODE_TOKEN: ${{ secrets.HASHNODE_TOKEN }}
+          HASHNODE_PUBLICATION_HOST: ${{ secrets.HASHNODE_PUBLICATION_HOST }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}

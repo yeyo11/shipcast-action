@@ -1,0 +1,60 @@
+{
+  "name": "@yeyo11/shipcast",
+  "version": "0.2.0",
+  "description": "Launch your GitHub projects: on each release, the AI writes the article and the posts from the code, a pull request holds them, and merging it publishes everything, once",
+  "license": "MIT",
+  "author": "Jose Antonio Garrido",
+  "type": "module",
+  "bin": {
+    "shipcast": "dist/cli/shipcast.js"
+  },
+  "files": [
+    "dist",
+    "drizzle",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yeyo11/shipcast.git",
+    "directory": "apps/cli"
+  },
+  "homepage": "https://github.com/yeyo11/shipcast#readme",
+  "bugs": "https://github.com/yeyo11/shipcast/issues",
+  "keywords": [
+    "launch",
+    "release",
+    "github-action",
+    "devto",
+    "bluesky",
+    "mastodon",
+    "blog",
+    "ai",
+    "claude",
+    "openai"
+  ],
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.88",
+    "@ai-sdk/openai": "^4.0.103",
+    "@ai-sdk/openai-compatible": "^3.0.78",
+    "@electric-sql/pglite": "^0.5.11",
+    "@modelcontextprotocol/server": "2.4.0",
+    "@resvg/resvg-js": "^2.6.2",
+    "ai": "^7.0.153",
+    "drizzle-orm": "^0.45.4",
+    "jpeg-js": "^0.4.4",
+    "marked": "^16.4.2",
+    "pg-boss": "^12.38.0",
+    "playwright-core": "^1.55.0",
+    "postgres": "^3.4.9",
+    "satori": "^0.63.2",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7"
+  },
+  "overrides": {
+    "fflate": "^0.7.5"
+  }
+}
