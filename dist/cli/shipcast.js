@@ -1869,7 +1869,7 @@ var LaunchConfig = z2.strictObject({
   /**
    * What else the launch is about besides this repo (launch-sources, docs/sources.md): further repos,
    * read at their default branch, and pages Shipcast fetches. This repo stays the primary one: its
-   * release is what triggers the launch. Ignored while the launch-sources flag is off
+   * release is what triggers the launch. Ignored by Action mode, which reads no sources
    */
   sources: z2.strictObject({
     repos: z2.array(z2.string().regex(/^[\w.-]+\/[\w.-]+$/, "a repo is owner/name")).max(5, "at most 5 further repos").default([]),
@@ -2588,6 +2588,7 @@ function toLaunch(row) {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     model: row.model === "app" ? "app" : "legacy",
+    ...row.title?.trim() && { title: row.title.trim() },
     ...row.deletedAt !== null && { deletedAt: row.deletedAt }
   };
 }
@@ -3331,60 +3332,8 @@ var CursorRepository = class {
   }
 };
 
-// ../../packages/engine/src/repositories/draft-snapshots.ts
-import { eq as eq9, inArray as inArray6 } from "drizzle-orm";
-var fromRow = (row) => ({
-  launchId: row.launchId,
-  pullRequest: { number: row.prNumber, url: row.url, state: row.state, branch: row.branch },
-  headSha: row.headSha,
-  launchYml: row.launchYml,
-  files: row.files,
-  readAt: row.readAt
-});
-var DraftSnapshotRepository = class {
-  #db;
-  constructor(db) {
-    this.#db = db;
-  }
-  async snapshot(launchId2) {
-    const [row] = await this.#db.select().from(draftSnapshots).where(eq9(draftSnapshots.launchId, launchId2));
-    return row ? fromRow(row) : void 0;
-  }
-  async snapshots(launchIds) {
-    if (launchIds.length === 0) return [];
-    return (await this.#db.select().from(draftSnapshots).where(inArray6(draftSnapshots.launchId, [...launchIds]))).map(fromRow);
-  }
-  /** Writes the launch's reading, replacing the one before: only the latest matters */
-  async saveSnapshot(input) {
-    const values2 = {
-      prNumber: input.pullRequest.number,
-      url: input.pullRequest.url,
-      branch: input.pullRequest.branch,
-      state: input.pullRequest.state,
-      headSha: input.headSha,
-      launchYml: input.launchYml,
-      files: input.files,
-      readAt: input.readAt ?? nowIso
-    };
-    const [row] = await this.#db.insert(draftSnapshots).values({ launchId: input.launchId, ...values2 }).onConflictDoUpdate({ target: draftSnapshots.launchId, set: values2 }).returning();
-    return fromRow(row);
-  }
-  /**
-   * One draft's text as Shipcast just committed it. Its sha and the head are no longer known: GitHub's
-   * `synchronize` delivery (or the next poll) fills them in. The reading time stays: the rest of the
-   * row is as old as it was.
-   */
-  async patchSnapshotFile(launchId2, path, content) {
-    const current = await this.snapshot(launchId2);
-    if (!current) return false;
-    const files = current.files.some((f) => f.path === path) ? current.files.map((f) => f.path === path ? { path, content, sha: null } : f) : [...current.files, { path, content, sha: null }];
-    await this.#db.update(draftSnapshots).set({ files, headSha: null }).where(eq9(draftSnapshots.launchId, launchId2));
-    return true;
-  }
-};
-
 // ../../packages/engine/src/repositories/launch-store.ts
-import { and as and7, desc as desc7, eq as eq10, inArray as inArray7, isNotNull, isNull as isNull2, max as max2, notInArray as notInArray2, or as or5 } from "drizzle-orm";
+import { and as and7, desc as desc7, eq as eq9, inArray as inArray6, isNotNull, isNull as isNull2, max as max2, notInArray as notInArray2, or as or5 } from "drizzle-orm";
 var mediaOf = (r) => ({
   id: r.id,
   launchId: r.launchId,
@@ -3404,14 +3353,14 @@ var LaunchStoreRepository = class {
   }
   /** The launch's newest accepted pack, which is the current one */
   async currentPack(launchId2) {
-    const [row] = await this.#db.select({ id: packs.id, version: packs.version, pack: packs.pack }).from(packs).where(and7(eq10(packs.launchId, launchId2), eq10(packs.accepted, true))).orderBy(desc7(packs.version)).limit(1);
+    const [row] = await this.#db.select({ id: packs.id, version: packs.version, pack: packs.pack }).from(packs).where(and7(eq9(packs.launchId, launchId2), eq9(packs.accepted, true))).orderBy(desc7(packs.version)).limit(1);
     return row;
   }
   /** A pack the AI wrote, accepted as the current one: the next version of the launch's packs */
   addPack(launchId2, pack2, meta = {}) {
     return transaction(this.#db, async (tx) => {
       await lockFor(tx, `launch-store:${launchId2}`);
-      const [last] = await tx.select({ n: max2(packs.version) }).from(packs).where(eq10(packs.launchId, launchId2));
+      const [last] = await tx.select({ n: max2(packs.version) }).from(packs).where(eq9(packs.launchId, launchId2));
       const [row] = await tx.insert(packs).values({ launchId: launchId2, version: (last?.n ?? 0) + 1, pack: pack2, aiTask: meta.aiTask ?? null, accepted: true, importBatch: meta.importBatch ?? null }).returning({ id: packs.id, version: packs.version, pack: packs.pack });
       return row;
     });
@@ -3419,17 +3368,17 @@ var LaunchStoreRepository = class {
   /** The launch's channel rows, replaced as a whole, and the launch.yml they were read from */
   replaceChannels(launchId2, rows2, source2, importBatch) {
     return transaction(this.#db, async (tx) => {
-      await tx.delete(launchChannels).where(eq10(launchChannels.launchId, launchId2));
+      await tx.delete(launchChannels).where(eq9(launchChannels.launchId, launchId2));
       if (rows2.length > 0) {
         await tx.insert(launchChannels).values(rows2.map((r) => ({ launchId: launchId2, channel: r.channel, mode: r.mode, options: r.options ?? {}, note: r.note ?? null, importBatch: importBatch ?? null })));
       }
-      await tx.update(launches).set({ channelsSource: source2 }).where(eq10(launches.id, launchId2));
+      await tx.update(launches).set({ channelsSource: source2 }).where(eq9(launches.id, launchId2));
     });
   }
   async channels(launchId2) {
     const [rows2, [launch2]] = await Promise.all([
-      this.#db.select({ channel: launchChannels.channel, mode: launchChannels.mode, options: launchChannels.options, note: launchChannels.note }).from(launchChannels).where(eq10(launchChannels.launchId, launchId2)).orderBy(launchChannels.channel),
-      this.#db.select({ source: launches.channelsSource }).from(launches).where(eq10(launches.id, launchId2))
+      this.#db.select({ channel: launchChannels.channel, mode: launchChannels.mode, options: launchChannels.options, note: launchChannels.note }).from(launchChannels).where(eq9(launchChannels.launchId, launchId2)).orderBy(launchChannels.channel),
+      this.#db.select({ source: launches.channelsSource }).from(launches).where(eq9(launches.id, launchId2))
     ]);
     return { rows: rows2, source: launch2?.source ?? null };
   }
@@ -3438,7 +3387,7 @@ var LaunchStoreRepository = class {
    * off the channels a launch never published on: what publishing then goes by instead of launch.yml
    */
   async importedChannels(launchId2) {
-    const [row] = await this.#db.select({ channel: launchChannels.channel }).from(launchChannels).where(and7(eq10(launchChannels.launchId, launchId2), isNotNull(launchChannels.importBatch))).limit(1);
+    const [row] = await this.#db.select({ channel: launchChannels.channel }).from(launchChannels).where(and7(eq9(launchChannels.launchId, launchId2), isNotNull(launchChannels.importBatch))).limit(1);
     return row !== void 0;
   }
   /** Every draft of the launch with its current version, by channel and piece */
@@ -3452,7 +3401,7 @@ var LaunchStoreRepository = class {
       body: draftVersions.body,
       fields: draftVersions.fields,
       origin: draftVersions.origin
-    }).from(drafts).innerJoin(draftVersions, eq10(draftVersions.id, drafts.currentVersionId)).where(eq10(drafts.launchId, launchId2)).orderBy(drafts.channel, drafts.piece);
+    }).from(drafts).innerJoin(draftVersions, eq9(draftVersions.id, drafts.currentVersionId)).where(eq9(drafts.launchId, launchId2)).orderBy(drafts.channel, drafts.piece);
   }
   /**
    * Adds a version to a piece's draft and makes it current, the draft made on its first. The draft is
@@ -3461,11 +3410,11 @@ var LaunchStoreRepository = class {
   addVersion(launchId2, input) {
     return transaction(this.#db, async (tx) => {
       await tx.insert(drafts).values({ launchId: launchId2, channel: input.channel, piece: input.piece, importBatch: input.importBatch ?? null }).onConflictDoNothing();
-      const [draft2] = await tx.select({ id: drafts.id }).from(drafts).where(and7(eq10(drafts.launchId, launchId2), eq10(drafts.channel, input.channel), eq10(drafts.piece, input.piece))).for("update");
-      const [last] = await tx.select({ n: max2(draftVersions.n) }).from(draftVersions).where(eq10(draftVersions.draftId, draft2.id));
+      const [draft2] = await tx.select({ id: drafts.id }).from(drafts).where(and7(eq9(drafts.launchId, launchId2), eq9(drafts.channel, input.channel), eq9(drafts.piece, input.piece))).for("update");
+      const [last] = await tx.select({ n: max2(draftVersions.n) }).from(draftVersions).where(eq9(draftVersions.draftId, draft2.id));
       const n = (last?.n ?? 0) + 1;
       const [version] = await tx.insert(draftVersions).values({ draftId: draft2.id, n, body: input.body, fields: input.fields ?? {}, origin: input.origin, author: input.author ?? null, packId: input.packId ?? null, importBatch: input.importBatch ?? null }).returning({ id: draftVersions.id });
-      await tx.update(drafts).set({ currentVersionId: version.id, updatedAt: nowIso }).where(eq10(drafts.id, draft2.id));
+      await tx.update(drafts).set({ currentVersionId: version.id, updatedAt: nowIso }).where(eq9(drafts.id, draft2.id));
       return { draftId: draft2.id, versionId: version.id, n };
     });
   }
@@ -3476,14 +3425,14 @@ var LaunchStoreRepository = class {
    */
   async retireDrafts(launchId2, keep) {
     const kept = new Set(keep.map((k) => `${k.channel}\0${k.piece}`));
-    const rows2 = await this.#db.select({ id: drafts.id, channel: drafts.channel, piece: drafts.piece }).from(drafts).where(and7(eq10(drafts.launchId, launchId2), isNotNull(drafts.currentVersionId)));
+    const rows2 = await this.#db.select({ id: drafts.id, channel: drafts.channel, piece: drafts.piece }).from(drafts).where(and7(eq9(drafts.launchId, launchId2), isNotNull(drafts.currentVersionId)));
     const retired = rows2.filter((r) => !kept.has(`${r.channel}\0${r.piece}`)).map((r) => r.id);
-    if (retired.length > 0) await this.#db.update(drafts).set({ currentVersionId: null, updatedAt: nowIso }).where(inArray7(drafts.id, retired));
+    if (retired.length > 0) await this.#db.update(drafts).set({ currentVersionId: null, updatedAt: nowIso }).where(inArray6(drafts.id, retired));
     return retired.length;
   }
   /** Removes the launch's own media rows (never a shared one) whose bytes are not in `keep`; answers the rows removed */
   async removeMedia(launchId2, keep) {
-    const own = eq10(media.launchId, launchId2);
+    const own = eq9(media.launchId, launchId2);
     const where = keep.length > 0 ? and7(own, notInArray2(media.sha256, [...keep])) : own;
     return (await this.#db.delete(media).where(where).returning()).map(mediaOf);
   }
@@ -3497,27 +3446,27 @@ var LaunchStoreRepository = class {
   }
   /** The launch's files, and the shared ones (covers) at any of `publicPaths` */
   async media(launchId2, publicPaths = []) {
-    const own = eq10(media.launchId, launchId2);
-    const where = publicPaths.length > 0 ? or5(own, and7(isNull2(media.launchId), inArray7(media.publicPath, [...publicPaths]))) : own;
+    const own = eq9(media.launchId, launchId2);
+    const where = publicPaths.length > 0 ? or5(own, and7(isNull2(media.launchId), inArray6(media.publicPath, [...publicPaths]))) : own;
     return (await this.#db.select().from(media).where(where).orderBy(media.id)).map(mediaOf);
   }
   /** Whether any row still names these bytes: the store keeps them by content, and two launches may share them */
   async mediaInUse(sha256) {
-    const [row] = await this.#db.select({ id: media.id }).from(media).where(eq10(media.sha256, sha256)).limit(1);
+    const [row] = await this.#db.select({ id: media.id }).from(media).where(eq9(media.sha256, sha256)).limit(1);
     return row !== void 0;
   }
   /** A published piece now says this version of its draft (an edit after publishing) */
   async linkPost(postId2, versionId) {
-    await this.#db.update(posts).set({ draftVersionId: versionId }).where(eq10(posts.id, postId2));
+    await this.#db.update(posts).set({ draftVersionId: versionId }).where(eq9(posts.id, postId2));
   }
   /** One stored file by its row's id, whichever launch it is of */
   async mediaRow(id) {
-    const [row] = await this.#db.select().from(media).where(eq10(media.id, id));
+    const [row] = await this.#db.select().from(media).where(eq9(media.id, id));
     return row && mediaOf(row);
   }
   /** The approval in force: the newest one not revoked */
   async approval(launchId2) {
-    const [row] = await this.#db.select({ id: approvals.id, by: approvals.by, at: approvals.at, versions: approvals.versions, note: approvals.note }).from(approvals).where(and7(eq10(approvals.launchId, launchId2), isNull2(approvals.revokedAt))).orderBy(desc7(approvals.at), desc7(approvals.id)).limit(1);
+    const [row] = await this.#db.select({ id: approvals.id, by: approvals.by, at: approvals.at, versions: approvals.versions, note: approvals.note }).from(approvals).where(and7(eq9(approvals.launchId, launchId2), isNull2(approvals.revokedAt))).orderBy(desc7(approvals.at), desc7(approvals.id)).limit(1);
     return row;
   }
   /**
@@ -3527,10 +3476,10 @@ var LaunchStoreRepository = class {
   approveOnce(launchId2, input) {
     return transaction(this.#db, async (tx) => {
       await lockFor(tx, `launch-store:${launchId2}`);
-      const [found] = await tx.select({ id: approvals.id, by: approvals.by, at: approvals.at, versions: approvals.versions, note: approvals.note }).from(approvals).where(and7(eq10(approvals.launchId, launchId2), isNull2(approvals.revokedAt))).limit(1);
+      const [found] = await tx.select({ id: approvals.id, by: approvals.by, at: approvals.at, versions: approvals.versions, note: approvals.note }).from(approvals).where(and7(eq9(approvals.launchId, launchId2), isNull2(approvals.revokedAt))).limit(1);
       if (found) return found;
       const [row] = await tx.insert(approvals).values({ launchId: launchId2, by: input.by, versions: input.versions, note: input.note ?? null, importBatch: input.importBatch ?? null, ...input.at && { at: input.at } }).returning({ id: approvals.id, by: approvals.by, at: approvals.at, versions: approvals.versions, note: approvals.note });
-      await tx.update(launches).set({ approvedAt: row.at }).where(eq10(launches.id, launchId2));
+      await tx.update(launches).set({ approvedAt: row.at }).where(eq9(launches.id, launchId2));
       return row;
     });
   }
@@ -3543,11 +3492,11 @@ var LaunchStoreRepository = class {
     return transaction(this.#db, async (tx) => {
       await lockFor(tx, `launch-store:${launchId2}`);
       const columns = { id: approvals.id, by: approvals.by, at: approvals.at, versions: approvals.versions, note: approvals.note };
-      const [found] = await tx.select(columns).from(approvals).where(and7(eq10(approvals.launchId, launchId2), isNull2(approvals.revokedAt))).orderBy(desc7(approvals.at), desc7(approvals.id)).limit(1);
+      const [found] = await tx.select(columns).from(approvals).where(and7(eq9(approvals.launchId, launchId2), isNull2(approvals.revokedAt))).orderBy(desc7(approvals.at), desc7(approvals.id)).limit(1);
       if (found && sameVersions(found.versions, input.versions)) return found;
-      await tx.update(approvals).set({ revokedAt: nowIso }).where(and7(eq10(approvals.launchId, launchId2), isNull2(approvals.revokedAt)));
+      await tx.update(approvals).set({ revokedAt: nowIso }).where(and7(eq9(approvals.launchId, launchId2), isNull2(approvals.revokedAt)));
       const [row] = await tx.insert(approvals).values({ launchId: launchId2, by: input.by, versions: input.versions, note: input.note ?? null }).returning(columns);
-      await tx.update(launches).set({ approvedAt: row.at }).where(eq10(launches.id, launchId2));
+      await tx.update(launches).set({ approvedAt: row.at }).where(eq9(launches.id, launchId2));
       return row;
     });
   }
@@ -3555,7 +3504,7 @@ var LaunchStoreRepository = class {
 var sameVersions = (a, b) => Object.keys(a).length === Object.keys(b).length && Object.entries(a).every(([k, v]) => b[k] === v);
 
 // ../../packages/engine/src/repositories/launch-imports.ts
-import { and as and8, desc as desc8, eq as eq11, inArray as inArray8, isNull as isNull3, sql as sql9 } from "drizzle-orm";
+import { and as and8, desc as desc8, eq as eq10, inArray as inArray7, isNull as isNull3, sql as sql9 } from "drizzle-orm";
 var HISTORY = [
   { table: "launches", where: (id) => sql9`id = ${id}` },
   { table: "posts", where: (id) => sql9`launch_id = ${id}` },
@@ -3577,19 +3526,19 @@ var LaunchImportRepository = class {
   }
   /** The batch's rows still in force (not rolled back), in the order they were written */
   async batch(batch) {
-    const rows2 = await this.#db.select().from(launchImports).where(and8(eq11(launchImports.batch, batch), isNull3(launchImports.rolledBackAt))).orderBy(launchImports.id);
+    const rows2 = await this.#db.select().from(launchImports).where(and8(eq10(launchImports.batch, batch), isNull3(launchImports.rolledBackAt))).orderBy(launchImports.id);
     return rows2.map((r) => ({ id: r.id, batch: r.batch, launchId: r.launchId, action: r.action, before: r.before, summary: r.summary, at: r.at }));
   }
   /** The import or deletion in force for a launch, if a batch made one */
   async logOf(launchId2) {
-    const [r] = await this.#db.select().from(launchImports).where(and8(eq11(launchImports.launchId, launchId2), isNull3(launchImports.rolledBackAt))).orderBy(desc8(launchImports.id)).limit(1);
+    const [r] = await this.#db.select().from(launchImports).where(and8(eq10(launchImports.launchId, launchId2), isNull3(launchImports.rolledBackAt))).orderBy(desc8(launchImports.id)).limit(1);
     return r && { id: r.id, batch: r.batch, launchId: r.launchId, action: r.action, before: r.before, summary: r.summary, at: r.at };
   }
   async record(row) {
     await this.#db.insert(launchImports).values(row);
   }
   async markRolledBack(batch) {
-    await this.#db.update(launchImports).set({ rolledBackAt: sql9`to_char(statement_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')` }).where(and8(eq11(launchImports.batch, batch), isNull3(launchImports.rolledBackAt)));
+    await this.#db.update(launchImports).set({ rolledBackAt: sql9`to_char(statement_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')` }).where(and8(eq10(launchImports.batch, batch), isNull3(launchImports.rolledBackAt)));
   }
   /** Whether any of the launch model's tables has a row of the launch: the shadow write's, or an import's */
   async holds(launchId2) {
@@ -3626,28 +3575,28 @@ var LaunchImportRepository = class {
     return removed;
   }
   async columns(launchId2) {
-    const [row] = await this.#db.select({ title: launches.title, dedupeKey: launches.dedupeKey, channelsSource: launches.channelsSource, approvedAt: launches.approvedAt }).from(launches).where(eq11(launches.id, launchId2));
+    const [row] = await this.#db.select({ title: launches.title, dedupeKey: launches.dedupeKey, channelsSource: launches.channelsSource, approvedAt: launches.approvedAt }).from(launches).where(eq10(launches.id, launchId2));
     return row;
   }
   async setColumns(launchId2, columns) {
-    await this.#db.update(launches).set(columns).where(eq11(launches.id, launchId2));
+    await this.#db.update(launches).set(columns).where(eq10(launches.id, launchId2));
   }
   /** The launch that holds a dedupe key, if one does */
   async dedupeKeyHolder(key) {
-    const [row] = await this.#db.select({ id: launches.id }).from(launches).where(eq11(launches.dedupeKey, key));
+    const [row] = await this.#db.select({ id: launches.id }).from(launches).where(eq10(launches.dedupeKey, key));
     return row?.id;
   }
   /** Points published pieces at the draft version they said; a post that names one already keeps it */
   async setPostVersions(pairs) {
     const set = [];
     for (const { postId: postId2, versionId } of pairs) {
-      const rows2 = await this.#db.update(posts).set({ draftVersionId: versionId }).where(and8(eq11(posts.id, postId2), isNull3(posts.draftVersionId))).returning({ id: posts.id });
+      const rows2 = await this.#db.update(posts).set({ draftVersionId: versionId }).where(and8(eq10(posts.id, postId2), isNull3(posts.draftVersionId))).returning({ id: posts.id });
       if (rows2.length > 0) set.push(postId2);
     }
     return set;
   }
   async clearPostVersions(postIds) {
-    if (postIds.length > 0) await this.#db.update(posts).set({ draftVersionId: null }).where(inArray8(posts.id, [...postIds]));
+    if (postIds.length > 0) await this.#db.update(posts).set({ draftVersionId: null }).where(inArray7(posts.id, [...postIds]));
   }
   async counts(launchId2) {
     const [row] = await this.#rows(sql9`SELECT
@@ -3704,7 +3653,7 @@ var LaunchImportRepository = class {
 };
 
 // ../../packages/engine/src/repositories/launch-deletions.ts
-import { and as and9, desc as desc9, eq as eq12 } from "drizzle-orm";
+import { and as and9, desc as desc9, eq as eq11 } from "drizzle-orm";
 var LaunchDeletionRepository = class {
   #db;
   constructor(db) {
@@ -3716,18 +3665,18 @@ var LaunchDeletionRepository = class {
   }
   /** Whether the launch this key names was removed by the owner, so no event launches it again */
   async removed(dedupeKey) {
-    const [row] = await this.#db.select({ id: launchDeletions.id }).from(launchDeletions).where(and9(eq12(launchDeletions.dedupeKey, dedupeKey), eq12(launchDeletions.mode, "removed"))).limit(1);
+    const [row] = await this.#db.select({ id: launchDeletions.id }).from(launchDeletions).where(and9(eq11(launchDeletions.dedupeKey, dedupeKey), eq11(launchDeletions.mode, "removed"))).limit(1);
     return row !== void 0;
   }
   /** The launch's deletion, the last one when it was hidden and then removed */
   async ofLaunch(launchId2) {
-    const [row] = await this.#db.select().from(launchDeletions).where(eq12(launchDeletions.launchId, launchId2)).orderBy(desc9(launchDeletions.id)).limit(1);
+    const [row] = await this.#db.select().from(launchDeletions).where(eq11(launchDeletions.launchId, launchId2)).orderBy(desc9(launchDeletions.id)).limit(1);
     return row ? { ...row, mode: row.mode } : void 0;
   }
 };
 
 // ../../packages/engine/src/repositories/settings.ts
-import { eq as eq13 } from "drizzle-orm";
+import { eq as eq12 } from "drizzle-orm";
 var SettingRepository = class {
   #db;
   constructor(db) {
@@ -3735,7 +3684,7 @@ var SettingRepository = class {
   }
   /** Something the owner chose (automation today), as it was stored; undefined until it is first set */
   async setting(key) {
-    const [row] = await this.#db.select({ value: settings.value }).from(settings).where(eq13(settings.key, key));
+    const [row] = await this.#db.select({ value: settings.value }).from(settings).where(eq12(settings.key, key));
     return row ? row.value : void 0;
   }
   async setSetting(key, value) {
@@ -3744,7 +3693,7 @@ var SettingRepository = class {
 };
 
 // ../../packages/engine/src/repositories/sources.ts
-import { and as and10, asc as asc5, eq as eq14, inArray as inArray9, isNotNull as isNotNull2, isNull as isNull4, ne as ne2 } from "drizzle-orm";
+import { and as and10, asc as asc5, eq as eq13, inArray as inArray8, isNotNull as isNotNull2, isNull as isNull4, ne as ne2 } from "drizzle-orm";
 var toMedia = (row) => ({
   id: row.id,
   sha256: row.sha256,
@@ -3781,7 +3730,7 @@ var LaunchSourceRepository = class {
   }
   /** A launch's sources in order, each uploaded file with its media row */
   async list(launchId2) {
-    const rows2 = await this.#db.select({ source: launchSources, file: media }).from(launchSources).leftJoin(media, eq14(media.id, launchSources.mediaId)).where(eq14(launchSources.launchId, launchId2)).orderBy(asc5(launchSources.position));
+    const rows2 = await this.#db.select({ source: launchSources, file: media }).from(launchSources).leftJoin(media, eq13(media.id, launchSources.mediaId)).where(eq13(launchSources.launchId, launchId2)).orderBy(asc5(launchSources.position));
     return rows2.map((r) => toSource(r.source, r.file));
   }
   /**
@@ -3790,7 +3739,7 @@ var LaunchSourceRepository = class {
    */
   async replace(launchId2, sources) {
     await transaction(this.#db, async (tx) => {
-      await tx.delete(launchSources).where(eq14(launchSources.launchId, launchId2));
+      await tx.delete(launchSources).where(eq13(launchSources.launchId, launchId2));
       if (sources.length === 0) return;
       await tx.insert(launchSources).values(
         sources.map((s, i) => ({
@@ -3817,13 +3766,13 @@ var LaunchSourceRepository = class {
   async furtherRepos(launchIds) {
     const out = /* @__PURE__ */ new Map();
     if (launchIds.length === 0) return out;
-    const rows2 = await this.#db.select({ launchId: launchSources.launchId, repo: launchSources.repo }).from(launchSources).where(and10(inArray9(launchSources.launchId, [...launchIds]), isNotNull2(launchSources.repo), ne2(launchSources.role, "primary"))).orderBy(asc5(launchSources.launchId), asc5(launchSources.position));
+    const rows2 = await this.#db.select({ launchId: launchSources.launchId, repo: launchSources.repo }).from(launchSources).where(and10(inArray8(launchSources.launchId, [...launchIds]), isNotNull2(launchSources.repo), ne2(launchSources.role, "primary"))).orderBy(asc5(launchSources.launchId), asc5(launchSources.position));
     for (const row of rows2) out.set(row.launchId, [...out.get(row.launchId) ?? [], row.repo]);
     return out;
   }
   /** Records the commit a repo source was read at, so a second analysis reads the same code */
   async freeze(sourceId2, sha2) {
-    await this.#db.update(launchSources).set({ sha: sha2 }).where(eq14(launchSources.id, sourceId2));
+    await this.#db.update(launchSources).set({ sha: sha2 }).where(eq13(launchSources.id, sourceId2));
   }
   /** Records an upload no launch owns yet; the same bytes uploaded twice are one row */
   async recordUpload(file) {
@@ -3832,20 +3781,20 @@ var LaunchSourceRepository = class {
   }
   /** An upload no launch owns yet, by its sha256 */
   async upload(sha256) {
-    const [row] = await this.#db.select().from(media).where(and10(isNull4(media.launchId), eq14(media.sha256, sha256))).limit(1);
+    const [row] = await this.#db.select().from(media).where(and10(isNull4(media.launchId), eq13(media.sha256, sha256))).limit(1);
     return row ? toMedia(row) : void 0;
   }
   /** The launch's own media row for an upload (the stored bytes are shared, by their key) */
   async attach(launchId2, upload) {
     const { id: _id, ...file } = upload;
     await this.#db.insert(media).values({ ...file, launchId: launchId2, role: "upload" }).onConflictDoNothing();
-    const [row] = await this.#db.select().from(media).where(and10(eq14(media.launchId, launchId2), eq14(media.sha256, upload.sha256))).limit(1);
+    const [row] = await this.#db.select().from(media).where(and10(eq13(media.launchId, launchId2), eq13(media.sha256, upload.sha256))).limit(1);
     return toMedia(row);
   }
 };
 
 // ../../packages/engine/src/repositories/metrics.ts
-import { and as and11, asc as asc6, desc as desc10, eq as eq15, inArray as inArray10, isNotNull as isNotNull3, isNull as isNull5, sql as sql10 } from "drizzle-orm";
+import { and as and11, asc as asc6, desc as desc10, eq as eq14, inArray as inArray9, isNotNull as isNotNull3, isNull as isNull5, sql as sql10 } from "drizzle-orm";
 var isTopListMetric = (name2) => /^(?:referrer|referrer_visitors|path|path_visitors):/.test(name2);
 var seen = sql10`coalesce(${metrics.checkedAt}, ${metrics.takenAt})`;
 function sumsAt(rows2, moments, average = false) {
@@ -3870,18 +3819,18 @@ var MetricRepository = class {
     const at = takenAt.toISOString();
     const finite = Object.entries(values2).filter(([, value]) => Number.isFinite(value));
     if (finite.length === 0) return { inserted: 0, checked: 0 };
-    const ofThis = and11(eq15(metrics.launchId, launchId2), postId2 === null ? isNull5(metrics.postId) : eq15(metrics.postId, postId2), eq15(metrics.source, source2));
+    const ofThis = and11(eq14(metrics.launchId, launchId2), postId2 === null ? isNull5(metrics.postId) : eq14(metrics.postId, postId2), eq14(metrics.source, source2));
     let fresh2 = finite;
     let checked2 = 0;
     if (options.unchangedMovesCheck) {
-      const newest = await this.#db.selectDistinctOn([metrics.name], { name: metrics.name, value: metrics.value, takenAt: metrics.takenAt }).from(metrics).where(and11(ofThis, inArray10(metrics.name, finite.map(([name2]) => name2)))).orderBy(metrics.name, desc10(metrics.takenAt));
+      const newest = await this.#db.selectDistinctOn([metrics.name], { name: metrics.name, value: metrics.value, takenAt: metrics.takenAt }).from(metrics).where(and11(ofThis, inArray9(metrics.name, finite.map(([name2]) => name2)))).orderBy(metrics.name, desc10(metrics.takenAt));
       const last = new Map(newest.map((r) => [r.name, r]));
       const same = finite.filter(([name2, value]) => last.get(name2)?.value === value && last.get(name2).takenAt <= at);
       fresh2 = finite.filter(([name2]) => !same.some(([n]) => n === name2));
       const byMoment = /* @__PURE__ */ new Map();
       for (const [name2] of same) byMoment.set(last.get(name2).takenAt, [...byMoment.get(last.get(name2).takenAt) ?? [], name2]);
       for (const [moment3, names] of byMoment) {
-        await this.#db.update(metrics).set({ checkedAt: at }).where(and11(ofThis, eq15(metrics.takenAt, moment3), inArray10(metrics.name, names)));
+        await this.#db.update(metrics).set({ checkedAt: at }).where(and11(ofThis, eq14(metrics.takenAt, moment3), inArray9(metrics.name, names)));
       }
       checked2 = same.length;
     }
@@ -3904,7 +3853,7 @@ var MetricRepository = class {
   }
   /** A launch's numbers per day, oldest first: of one source, or every source's */
   async metricDays(launchId2, source2) {
-    return this.#db.select({ launchId: metricDays.launchId, postId: metricDays.postId, source: metricDays.source, name: metricDays.name, day: metricDays.day, value: metricDays.value, readAt: metricDays.readAt }).from(metricDays).where(source2 === void 0 ? eq15(metricDays.launchId, launchId2) : and11(eq15(metricDays.launchId, launchId2), eq15(metricDays.source, source2))).orderBy(asc6(metricDays.day), asc6(metricDays.source), asc6(metricDays.name));
+    return this.#db.select({ launchId: metricDays.launchId, postId: metricDays.postId, source: metricDays.source, name: metricDays.name, day: metricDays.day, value: metricDays.value, readAt: metricDays.readAt }).from(metricDays).where(source2 === void 0 ? eq14(metricDays.launchId, launchId2) : and11(eq14(metricDays.launchId, launchId2), eq14(metricDays.source, source2))).orderBy(asc6(metricDays.day), asc6(metricDays.source), asc6(metricDays.name));
   }
   /**
    * The newest reading of every metric of a launch, its pieces' added up: the rows that held at the
@@ -3923,7 +3872,7 @@ var MetricRepository = class {
   }
   /** The newest reading of every metric of a launch, its pieces' added up, with how many there were */
   async #latestSums(launchId2) {
-    const last = this.#db.select({ source: metrics.source, name: metrics.name, at: sql10`max(${seen})`.as("at") }).from(metrics).where(eq15(metrics.launchId, launchId2)).groupBy(metrics.source, metrics.name).as("last");
+    const last = this.#db.select({ source: metrics.source, name: metrics.name, at: sql10`max(${seen})`.as("at") }).from(metrics).where(eq14(metrics.launchId, launchId2)).groupBy(metrics.source, metrics.name).as("last");
     return this.#db.select({
       launchId: metrics.launchId,
       source: metrics.source,
@@ -3932,11 +3881,11 @@ var MetricRepository = class {
       pieces: sql10`count(*)::int`.mapWith(Number).as("pieces"),
       takenAt: sql10`max(${metrics.takenAt})`.as("taken_at"),
       checkedAt: last.at
-    }).from(metrics).innerJoin(last, and11(eq15(last.source, metrics.source), eq15(last.name, metrics.name), sql10`${metrics.takenAt} <= ${last.at}`, sql10`${seen} >= ${last.at}`)).where(eq15(metrics.launchId, launchId2)).groupBy(metrics.launchId, metrics.source, metrics.name, last.at).orderBy(asc6(metrics.source), asc6(metrics.name));
+    }).from(metrics).innerJoin(last, and11(eq14(last.source, metrics.source), eq14(last.name, metrics.name), sql10`${metrics.takenAt} <= ${last.at}`, sql10`${seen} >= ${last.at}`)).where(eq14(metrics.launchId, launchId2)).groupBy(metrics.launchId, metrics.source, metrics.name, last.at).orderBy(asc6(metrics.source), asc6(metrics.name));
   }
   /** Every reading of one metric of a launch, oldest first: its curve, a point at each moment it was read */
   async metricHistory(launchId2, source2, name2) {
-    const rows2 = await this.#db.select({ value: metrics.value, takenAt: metrics.takenAt, checkedAt: metrics.checkedAt }).from(metrics).where(and11(eq15(metrics.launchId, launchId2), eq15(metrics.source, source2), eq15(metrics.name, name2))).orderBy(asc6(metrics.takenAt));
+    const rows2 = await this.#db.select({ value: metrics.value, takenAt: metrics.takenAt, checkedAt: metrics.checkedAt }).from(metrics).where(and11(eq14(metrics.launchId, launchId2), eq14(metrics.source, source2), eq14(metrics.name, name2))).orderBy(asc6(metrics.takenAt));
     const moments = rows2.flatMap((r) => r.checkedAt ? [r.takenAt, r.checkedAt] : [r.takenAt]);
     return sumsAt(rows2, moments, isAveragedMetric(source2, name2)).map((p) => ({ launchId: launchId2, source: source2, name: name2, value: p.value, takenAt: p.at, checkedAt: p.at }));
   }
@@ -3946,12 +3895,12 @@ var MetricRepository = class {
    * `checkedAt` is when it was last seen unchanged (its `takenAt` when never).
    */
   async postMetricHistory(launchId2) {
-    const rows2 = await this.#db.select({ postId: metrics.postId, name: metrics.name, value: metrics.value, takenAt: metrics.takenAt, checkedAt: seen }).from(metrics).where(and11(eq15(metrics.launchId, launchId2), isNotNull3(metrics.postId))).orderBy(asc6(metrics.takenAt));
+    const rows2 = await this.#db.select({ postId: metrics.postId, name: metrics.name, value: metrics.value, takenAt: metrics.takenAt, checkedAt: seen }).from(metrics).where(and11(eq14(metrics.launchId, launchId2), isNotNull3(metrics.postId))).orderBy(asc6(metrics.takenAt));
     return rows2.flatMap((r) => r.postId === null ? [] : [{ postId: r.postId, name: r.name, value: r.value, takenAt: r.takenAt, checkedAt: r.checkedAt }]);
   }
   /** The newest reading of every metric of one piece. */
   async postMetrics(postId2) {
-    return this.#db.selectDistinctOn([metrics.name], { launchId: metrics.launchId, source: metrics.source, name: metrics.name, value: metrics.value, takenAt: metrics.takenAt, checkedAt: seen }).from(metrics).where(eq15(metrics.postId, postId2)).orderBy(asc6(metrics.name), desc10(metrics.takenAt));
+    return this.#db.selectDistinctOn([metrics.name], { launchId: metrics.launchId, source: metrics.source, name: metrics.name, value: metrics.value, takenAt: metrics.takenAt, checkedAt: seen }).from(metrics).where(eq14(metrics.postId, postId2)).orderBy(asc6(metrics.name), desc10(metrics.takenAt));
   }
   /**
    * When each piece's and each launch's numbers of a source were last read, newest first per
@@ -3960,12 +3909,12 @@ var MetricRepository = class {
    */
   async lastChecked(launchIds) {
     if (launchIds.length === 0) return [];
-    return this.#db.select({ launchId: metrics.launchId, postId: metrics.postId, source: metrics.source, name: metrics.name, at: sql10`max(${seen})` }).from(metrics).where(inArray10(metrics.launchId, [...launchIds])).groupBy(metrics.launchId, metrics.postId, metrics.source, metrics.name);
+    return this.#db.select({ launchId: metrics.launchId, postId: metrics.postId, source: metrics.source, name: metrics.name, at: sql10`max(${seen})` }).from(metrics).where(inArray9(metrics.launchId, [...launchIds])).groupBy(metrics.launchId, metrics.postId, metrics.source, metrics.name);
   }
 };
 
 // ../../packages/engine/src/repositories/posts.ts
-import { and as and12, asc as asc7, count as count5, eq as eq16, gte as gte3, inArray as inArray11, like, max as max3, notInArray as notInArray3, or as or6, sql as sql11 } from "drizzle-orm";
+import { and as and12, asc as asc7, count as count5, eq as eq15, gte as gte3, inArray as inArray10, like, max as max3, notInArray as notInArray3, or as or6, sql as sql11 } from "drizzle-orm";
 function kindLanguage(kind) {
   const lang = /^(?:article|issue):(en|es)$/.exec(kind)?.[1];
   return lang === "en" || lang === "es" ? lang : void 0;
@@ -4010,7 +3959,7 @@ var PostRepository = class _PostRepository {
         contentHash: post.contentHash ?? null,
         publishedAt: nowIso,
         updatedAt: nowIso
-      }).where(and12(eq16(posts.launchId, post.launchId), eq16(posts.channel, post.channel), eq16(posts.kind, post.kind ?? "post"), eq16(posts.status, "scheduled"))).returning();
+      }).where(and12(eq15(posts.launchId, post.launchId), eq15(posts.channel, post.channel), eq15(posts.kind, post.kind ?? "post"), eq15(posts.status, "scheduled"))).returning();
       if (promoted) return { recorded: true, post: toPost(promoted) };
     }
     const values2 = {
@@ -4027,9 +3976,9 @@ var PostRepository = class _PostRepository {
     if (inserted) return { recorded: true, post: toPost(inserted) };
     const [existing3] = await this.#db.select().from(posts).where(
       and12(
-        eq16(posts.launchId, values2.launchId),
-        eq16(posts.channel, values2.channel),
-        eq16(posts.kind, values2.kind),
+        eq15(posts.launchId, values2.launchId),
+        eq15(posts.channel, values2.channel),
+        eq15(posts.kind, values2.kind),
         // What the constraint's NULLS NOT DISTINCT means, said in a query
         sql11`${posts.accountId} IS NOT DISTINCT FROM ${values2.accountId}`
       )
@@ -4038,14 +3987,14 @@ var PostRepository = class _PostRepository {
   }
   /** A launch's pieces, oldest first; only one channel's, or one kind's, when asked */
   async posts(launchId2, filter = {}) {
-    const where = [eq16(posts.launchId, launchId2)];
-    if (filter.channel !== void 0) where.push(eq16(posts.channel, filter.channel));
-    if (filter.kind !== void 0) where.push(eq16(posts.kind, filter.kind));
+    const where = [eq15(posts.launchId, launchId2)];
+    if (filter.channel !== void 0) where.push(eq15(posts.channel, filter.channel));
+    if (filter.kind !== void 0) where.push(eq15(posts.kind, filter.kind));
     const rows2 = await this.#db.select().from(posts).where(and12(...where)).orderBy(asc7(posts.publishedAt), asc7(posts.channel), asc7(posts.kind), asc7(posts.id));
     return rows2.map(toPost);
   }
   async post(id) {
-    const [row] = await this.#db.select().from(posts).where(eq16(posts.id, id));
+    const [row] = await this.#db.select().from(posts).where(eq15(posts.id, id));
     return row ? toPost(row) : void 0;
   }
   /**
@@ -4053,7 +4002,7 @@ var PostRepository = class _PostRepository {
    * deleted. The row stays either way, so the piece still counts as published and is never sent again.
    */
   async updatePost(id, change) {
-    const [row] = await this.#db.update(posts).set({ status: change.status, ...change.contentHash !== void 0 && { contentHash: change.contentHash }, updatedAt: nowIso }).where(eq16(posts.id, id)).returning();
+    const [row] = await this.#db.update(posts).set({ status: change.status, ...change.contentHash !== void 0 && { contentHash: change.contentHash }, updatedAt: nowIso }).where(eq15(posts.id, id)).returning();
     if (!row) throw new Error(`no post ${id}`);
     return toPost(row);
   }
@@ -4070,7 +4019,7 @@ var PostRepository = class _PostRepository {
       if (pieces2.some((p) => p.status !== "scheduled")) return void 0;
       const existing3 = pieces2.find((p) => p.kind === "post");
       if (existing3) {
-        const [moved] = await tx.#db.update(posts).set({ scheduledAt: at.toISOString(), updatedAt: nowIso }).where(and12(eq16(posts.id, existing3.id), eq16(posts.status, "scheduled"))).returning();
+        const [moved] = await tx.#db.update(posts).set({ scheduledAt: at.toISOString(), updatedAt: nowIso }).where(and12(eq15(posts.id, existing3.id), eq15(posts.status, "scheduled"))).returning();
         return moved ? toPost(moved) : void 0;
       }
       const [row] = await tx.#db.insert(posts).values({ launchId: launchId2, channel: channel2, kind: "post", accountId: null, externalId: null, url: null, status: "scheduled", scheduledAt: at.toISOString() }).returning();
@@ -4079,21 +4028,21 @@ var PostRepository = class _PostRepository {
   }
   /** Moves a piece still waiting for its time; undefined when it is not (any more) scheduled */
   async reschedulePost(id, at) {
-    const [row] = await this.#db.update(posts).set({ scheduledAt: at.toISOString(), updatedAt: nowIso }).where(and12(eq16(posts.id, id), eq16(posts.status, "scheduled"))).returning();
+    const [row] = await this.#db.update(posts).set({ scheduledAt: at.toISOString(), updatedAt: nowIso }).where(and12(eq15(posts.id, id), eq15(posts.status, "scheduled"))).returning();
     return row ? toPost(row) : void 0;
   }
   /** Removes the waiting row of a piece not yet out; undefined when it was not scheduled */
   async unschedulePost(id) {
-    const [row] = await this.#db.delete(posts).where(and12(eq16(posts.id, id), eq16(posts.status, "scheduled"))).returning();
+    const [row] = await this.#db.delete(posts).where(and12(eq15(posts.id, id), eq15(posts.status, "scheduled"))).returning();
     return row ? toPost(row) : void 0;
   }
   /** Drops what is left waiting of a launch's channel once that channel is done, or failed for good */
   async clearSchedule(launchId2, channel2) {
-    await this.#db.delete(posts).where(and12(eq16(posts.launchId, launchId2), eq16(posts.channel, channel2), eq16(posts.status, "scheduled")));
+    await this.#db.delete(posts).where(and12(eq15(posts.launchId, launchId2), eq15(posts.channel, channel2), eq15(posts.status, "scheduled")));
   }
   /** Every piece waiting for its time, the soonest first; those due by `dueBy` only, when given */
   async scheduledPosts(filter = {}) {
-    const where = [eq16(posts.status, "scheduled")];
+    const where = [eq15(posts.status, "scheduled")];
     if (filter.dueBy) where.push(sql11`${posts.scheduledAt} <= ${filter.dueBy.toISOString()}`);
     const rows2 = await this.#db.select().from(posts).where(and12(...where)).orderBy(asc7(posts.scheduledAt), asc7(posts.id));
     return rows2.map(toPost);
@@ -4104,7 +4053,7 @@ var PostRepository = class _PostRepository {
    */
   async postsSince(since, channels3) {
     if (channels3.length === 0) return [];
-    const rows2 = await this.#db.select().from(posts).where(and12(gte3(posts.publishedAt, since), inArray11(posts.channel, [...channels3]), or6(eq16(posts.kind, "post"), like(posts.kind, "post:%")), inArray11(posts.status, ["live", "edited"]))).orderBy(asc7(posts.publishedAt), asc7(posts.id));
+    const rows2 = await this.#db.select().from(posts).where(and12(gte3(posts.publishedAt, since), inArray10(posts.channel, [...channels3]), or6(eq15(posts.kind, "post"), like(posts.kind, "post:%")), inArray10(posts.status, ["live", "edited"]))).orderBy(asc7(posts.publishedAt), asc7(posts.id));
     return rows2.map(toPost);
   }
   /**
@@ -4129,7 +4078,6 @@ function repositoriesOn(db) {
     jobs: new JobRepository(db),
     accounts: new AccountRepository(db),
     cursors: new CursorRepository(db),
-    drafts: new DraftSnapshotRepository(db),
     launchStore: new LaunchStoreRepository(db),
     launchImports: new LaunchImportRepository(db),
     launchDeletions: new LaunchDeletionRepository(db),
@@ -9416,15 +9364,6 @@ function launchDir(launch2) {
   if (isArticle(launch2)) return `articles/${launch2.ref.slice("article:".length).replace(/[^a-z0-9-]/g, "-")}`;
   return `launches/${projectSlug(launch2.repo)}/${launch2.ref.replace(/[^A-Za-z0-9._-]/g, "_")}`;
 }
-async function packOnLaunchesRepo(github, launchesRepo, launch2) {
-  const text3 = await github.fileAt(launchesRepo, `${launchDir(launch2)}/pack.json`, "HEAD").catch(() => void 0);
-  try {
-    const parsed = text3 === void 0 ? void 0 : ContentPack.safeParse(JSON.parse(text3));
-    return parsed?.success ? parsed.data : void 0;
-  } catch {
-    return void 0;
-  }
-}
 function draftsBranch(launch2) {
   const dir = launchDir(launch2);
   return isArticle(launch2) ? `article/${dir.slice("articles/".length)}` : `launch/${dir.slice("launches/".length).replace("/", "-")}`;
@@ -9806,27 +9745,32 @@ var ListFilesInput = z10.strictObject({
   glob: z10.string().max(200).optional().describe("Only files matching it"),
   depth: z10.number().int().min(1).max(20).optional().describe("How many directory levels below `path` to list; every level when absent")
 });
-var GitInput = z10.discriminatedUnion("command", [
-  z10.strictObject({
-    command: z10.literal("log"),
-    range: Range.optional().describe('A ref or a range: "v0.8.0..v0.9.0"; the checked-out commit when absent'),
-    n: z10.number().int().min(1).max(REPO_TOOL_LIMITS.logMax).optional(),
-    paths: z10.array(RepoPath).max(20).optional().describe("Only commits touching these paths")
-  }),
-  z10.strictObject({ command: z10.literal("tags"), n: z10.number().int().min(1).max(200).optional().describe("The newest n tags, by date") }),
-  z10.strictObject({
-    command: z10.literal("show"),
-    ref: Ref,
-    path: RepoPath.optional().describe("A file as it was at the ref; without it, the commit with its changed files")
-  }),
-  z10.strictObject({
-    command: z10.literal("diff"),
-    from: Ref,
-    to: Ref,
-    path: RepoPath.optional().describe("The diff of this path; without it, the files changed and their line counts")
-  }),
-  z10.strictObject({ command: z10.literal("status") })
-]);
+var GIT_FIELDS = {
+  log: { takes: ["range", "n", "paths"], needs: [] },
+  tags: { takes: ["n"], needs: [] },
+  show: { takes: ["ref", "path"], needs: ["ref"] },
+  diff: { takes: ["from", "to", "path"], needs: ["from", "to"] },
+  status: { takes: [], needs: [] }
+};
+var GitInput = z10.strictObject({
+  command: z10.enum(["log", "tags", "show", "diff", "status"]).describe("log: commits (range, n, paths); tags: the newest tags (n); show: a commit or a file at a ref (ref, path); diff: between two refs (from, to, path); status: the working tree (nothing else)"),
+  range: Range.optional().describe('log only. A ref or a range: "v0.8.0..v0.9.0"; the checked-out commit when absent'),
+  n: z10.number().int().min(1).max(REPO_TOOL_LIMITS.logMax).optional().describe(`log: how many commits (default ${REPO_TOOL_LIMITS.logDefault}); tags: the newest n tags, by date (default 50)`),
+  paths: z10.array(RepoPath).max(20).optional().describe("log only. Only commits touching these paths"),
+  ref: Ref.optional().describe("show only, and needed there. A tag, a branch, a commit or HEAD~n"),
+  from: Ref.optional().describe("diff only, and needed there. The ref the diff starts from"),
+  to: Ref.optional().describe("diff only, and needed there. The ref the diff goes to"),
+  path: RepoPath.optional().describe("show: a file as it was at the ref, else the commit with its changed files; diff: the diff of this path, else the files changed and their line counts")
+}).superRefine((input, ctx) => {
+  const fields2 = GIT_FIELDS[input.command];
+  for (const key of Object.keys(input)) {
+    if (key === "command" || input[key] === void 0) continue;
+    if (!fields2.takes.includes(key)) ctx.addIssue({ code: "custom", path: [key], message: `git ${input.command} does not take ${key}` });
+  }
+  for (const key of fields2.needs) {
+    if (input[key] === void 0) ctx.addIssue({ code: "custom", path: [key], message: `git ${input.command} needs ${key}` });
+  }
+});
 var OverviewInput = z10.strictObject({
   lines: z10.number().int().min(10).max(REPO_TOOL_LIMITS.overviewMaxLines).optional().describe(`Lines of each doc shown (default ${REPO_TOOL_LIMITS.overviewLines})`)
 });
@@ -10066,8 +10010,9 @@ ${[...here, ...dirs].join("\n")}`;
         return this.#git(["show", "--no-color", "--no-ext-diff", "--stat", "--date=short", "--format=commit %H%nDate: %ad%nAuthor: %an%n%n%B", "--end-of-options", command.ref]);
       case "diff": {
         const base = ["diff", "--no-color", "--no-ext-diff", "--no-textconv"];
-        if (command.path) return await this.#git([...base, "--end-of-options", command.from, command.to, "--", command.path]) || "no differences";
-        return await this.#git([...base, "--stat=200", "--end-of-options", command.from, command.to]) || "no differences";
+        const refs = [command.from, command.to];
+        if (command.path) return await this.#git([...base, "--end-of-options", ...refs, "--", command.path]) || "no differences";
+        return await this.#git([...base, "--stat=200", "--end-of-options", ...refs]) || "no differences";
       }
       case "status":
         return this.#git(["status", "--short", "--branch"]);
@@ -10206,7 +10151,7 @@ function repoTools(root, options = {}) {
       execute: (input) => guard(() => reader.listFiles(input))
     }),
     git: tool({
-      description: "Reads the history: log (a ref or a range like v0.8.0..v0.9.0, -n, paths), tags (newest first, with dates), show (a commit with its changed files, or a file as it was at a ref), diff (between two refs: the changed files, or one path) and status. Read-only.",
+      description: "Reads the history, one command per call: log (range: a ref or a range like v0.8.0..v0.9.0, n, paths), tags (newest first, with dates; n), show (ref: a commit with its changed files, or with path a file as it was at that ref), diff (from and to: the changed files between two refs, or with path the diff of one file) and status (no other field). Give only the fields of the command you run. Read-only.",
       inputSchema: GitInput,
       execute: (input) => guard(() => reader.git(input))
     })
@@ -12000,9 +11945,6 @@ async function aiTextsOf(deps) {
 }
 async function deliverDrafts(launch2, deps, drafts2, options) {
   const { source: source2, ...pull } = drafts2;
-  const shadow = async (delivered, files, direct) => {
-    if (source2) await deps.launchStore?.drafted(delivered, { ...source2, files, ...direct && { direct } }).catch(() => void 0);
-  };
   if (deps.appReview && source2) {
     try {
       const held = await deps.appReview.hold(launch2, { ...source2, files: pull.files }, { direct: options.direct ?? false });
@@ -12018,13 +11960,10 @@ async function deliverDrafts(launch2, deps, drafts2, options) {
       const commit = await deps.github.commitToBranch(deps.launchesRepo, "main", pull.message, files);
       const where = `https://github.com/${deps.launchesRepo}/commit/${commit.sha}`;
       const drafted2 = await deps.registry.launches.setStatus(launch2.id, "drafted", `direct:${commit.sha} ${where}`);
-      await shadow(drafted2, files, { sha: commit.sha });
       return { ok: true, launch: drafted2, where };
     }
     const pr = await deps.github.openPullRequest({ repo: deps.launchesRepo, base: "main", ...pull });
     const drafted = await deps.registry.launches.setStatus(launch2.id, "drafted", pr.url);
-    await deps.drafts?.opened(drafted, pr, pull.branch, pull.files).catch(() => void 0);
-    await shadow(drafted, pull.files);
     return { ok: true, launch: drafted, where: pr.url };
   } catch (error) {
     const what = options.direct ? "commit the drafts to main" : "open the drafts pull request";
@@ -12301,8 +12240,7 @@ async function checkAgainstCode(text3, context, deps) {
 }
 async function launchGrounding(launch2, deps) {
   if (isArticle(launch2)) return { kind: "article" };
-  const fromRepo = () => packOnLaunchesRepo(deps.github, deps.launchesRepo, launch2);
-  const analysis = (await (deps.stored ? deps.stored.pack(launch2, fromRepo) : fromRepo()).catch(() => void 0))?.analysis;
+  const analysis = (await deps.stored.pack(launch2).catch(() => void 0))?.analysis;
   return { kind: "launch", launch: { repo: launch2.repo, ref: launch2.ref, ...analysis && { analysis } } };
 }
 var launchCodeRef = (launch2) => launch2.ref.startsWith("public:") ? "HEAD" : launch2.ref;
@@ -13000,7 +12938,6 @@ import { createHash as createHash4 } from "node:crypto";
 import { isMap, isScalar, parseDocument as parseDocument4 } from "yaml";
 
 // ../../packages/engine/src/launch-store.ts
-import { isDeepStrictEqual } from "node:util";
 import { parseDocument as parseDocument3 } from "yaml";
 var MAIN_PIECE = "post";
 var RELEASE_NOTES = "releaseNotes";
@@ -13053,48 +12990,6 @@ function channelsAsLaunchYml(source2, rows2) {
   return String(doc);
 }
 var draftPath = (draft2) => typeof draft2.fields.path === "string" ? draft2.fields.path : void 0;
-function storeDifferences(launch2, copy, files, launchYml) {
-  const out = [];
-  const draftsByKey = new Map(copy.drafts.map((d) => [`${d.channel}
-${d.piece}`, d]));
-  const seen2 = /* @__PURE__ */ new Set();
-  for (const file of files) {
-    const stored2 = storedFile(launch2, file.path);
-    if (stored2.kind === "draft") {
-      const draft2 = draftsByKey.get(`${stored2.channel}
-${stored2.piece}`);
-      seen2.add(`${stored2.channel}
-${stored2.piece}`);
-      if (!draft2) out.push(`${file.path}: no draft in the database`);
-      else if (file.content !== null && draft2.body !== file.content) out.push(`${file.path}: the database's version ${draft2.n} differs from the pull request`);
-    } else if (stored2.kind === "pack") {
-      if (!copy.pack) out.push(`${file.path}: no pack in the database`);
-      else if (file.content !== null && !samePack(copy.pack.pack, file.content)) out.push(`${file.path}: the database's pack ${copy.pack.version} differs from the pull request`);
-    } else if (stored2.kind === "channels") {
-      if (copy.channelsSource === null) out.push(`${file.path}: no channels in the database`);
-      else if (file.content !== null && copy.channelsSource !== file.content) out.push(`${file.path}: the database's channels were read from another launch.yml`);
-    } else if (stored2.kind === "media") {
-      const row = copy.media.find((m) => m.publicPath === stored2.publicPath);
-      if (!row) out.push(`${file.path}: no media in the database`);
-      else if (file.sha256 !== void 0 && row.sha256 !== file.sha256) out.push(`${file.path}: the database's file has other bytes`);
-    }
-  }
-  for (const draft2 of copy.drafts) {
-    if (!seen2.has(`${draft2.channel}
-${draft2.piece}`)) out.push(`${draftPath(draft2) ?? `${draft2.channel} ${draft2.piece}`}: in the database, not in the pull request`);
-  }
-  if (launchYml !== void 0 && launchYml !== null && !launch2.ref.startsWith("article:") && copy.channelsSource !== launchYml) {
-    out.push(`launch.yml of ${launch2.repo}: the database's channels were read from another version`);
-  }
-  return out;
-}
-function samePack(stored2, text3) {
-  try {
-    return isDeepStrictEqual(stored2, JSON.parse(text3));
-  } catch {
-    return false;
-  }
-}
 
 // ../../packages/engine/src/launch-import.ts
 function readLaunchYml(text3) {
@@ -13353,21 +13248,33 @@ var BUILT_IN_PUBLISHING = {
   instagram: true,
   newsletter: true
 };
-var APP_REVIEW_OFF = "the launch is held by Shipcast and the app-review flag is off";
+var APP_REVIEW_OFF = "the launch is held by Shipcast, and this process does not read the launch model";
 async function mergedContent(launch2, deps) {
   const { github, registry } = deps;
   const approved = await approval(launch2, deps);
   if (approved.state === "waiting") return { state: "waiting", launch: launch2, reason: approved.reason };
   if (approved.state === "closed") return { state: "skipped", launch: await registry.launches.setStatus(launch2.id, "skipped", `${launch2.detail}: closed without merging`) };
-  await deps.launchStore?.merged(launch2).catch(() => void 0);
+  const held = await heldContent(launch2, deps);
+  if (held) return held;
   const dir = launchDir(launch2);
   const packText = await github.fileAt(deps.launchesRepo, `${dir}/pack.json`, "HEAD");
   if (!packText) return { state: "waiting", launch: launch2, reason: `${dir}/pack.json is not on the default branch yet` };
   const pack2 = (deps.channels ? contentPackFor(deps.channels) : ContentPack).parse(JSON.parse(packText));
-  const imported = registry.launchStore && await registry.launchStore.importedChannels(launch2.id) ? storedChannelConfig(await registry.launchStore.channels(launch2.id)) : void 0;
-  const config = imported ?? await launchConfigOf(github, deps.launchesRepo, launch2);
+  const config = await launchConfigOf(github, deps.launchesRepo, launch2);
   if (!config) return { state: "waiting", launch: launch2, reason: `${LAUNCH_CONFIG_PATH} of ${launch2.repo} cannot be read` };
   return { pack: pack2, config, read: (path) => github.fileAt(deps.launchesRepo, path, "HEAD"), waits: /* @__PURE__ */ new Map() };
+}
+async function heldContent(launch2, deps) {
+  const store2 = deps.registry.launchStore;
+  const stored2 = store2 && await store2.currentPack(launch2.id);
+  if (!store2 || !stored2) return void 0;
+  const parsed = (deps.channels ? contentPackFor(deps.channels) : ContentPack).safeParse(readPack(stored2.pack).pack);
+  if (!parsed.success) return { state: "waiting", launch: launch2, reason: "the launch\u2019s pack does not parse" };
+  const [channels3, drafts2] = await Promise.all([store2.channels(launch2.id), store2.drafts(launch2.id)]);
+  const config = storedChannelConfig(channels3);
+  if (!config) return { state: "waiting", launch: launch2, reason: "the launch\u2019s channels cannot be read" };
+  const byPath2 = new Map(drafts2.flatMap((d) => draftPath(d) ? [[draftPath(d), d.body]] : []));
+  return { pack: parsed.data, config, read: async (path) => byPath2.get(path), waits: /* @__PURE__ */ new Map() };
 }
 async function publishLaunch(launch2, brand, deps) {
   if (launch2.deletedAt) return { state: "skipped", launch: launch2 };
@@ -13896,28 +13803,6 @@ function describe2(path, dir) {
   return { path, label: name2, kind: "data" };
 }
 var ORDER = { article: 0, channel: 1, image: 2, video: 3, data: 4 };
-async function readReview(launch2, deps) {
-  const number2 = pullRequestNumber(launch2);
-  if (!number2) return void 0;
-  const pr = await deps.github.pullRequest(deps.launchesRepo, number2);
-  const ref = pr.state === "merged" ? "HEAD" : pr.branch;
-  const dir = launchDir(launch2);
-  const drafts2 = await Promise.all(
-    (await deps.github.pullRequestFiles(deps.launchesRepo, number2)).map(async (path) => {
-      const draft2 = describe2(path, dir);
-      if (draft2.kind === "article" || draft2.kind === "channel") draft2.content = await deps.github.fileAt(deps.launchesRepo, path, ref) ?? "";
-      return withMediaUrl(draft2, deps.launchesRepo, ref);
-    })
-  );
-  return { pullRequest: { number: pr.number, url: pr.url, state: pr.state, branch: pr.branch }, drafts: sorted(drafts2) };
-}
-var isText = (draft2) => draft2.kind === "article" || draft2.kind === "channel";
-function withMediaUrl(draft2, launchesRepo, ref) {
-  if (draft2.kind === "image" || draft2.kind === "video") {
-    draft2.url = `https://raw.githubusercontent.com/${launchesRepo}/${(ref === "HEAD" ? "main" : ref).split("/").map(encodeURIComponent).join("/")}/${draft2.path}`;
-  }
-  return draft2;
-}
 var sorted = (drafts2) => drafts2.sort((a, b) => ORDER[a.kind] - ORDER[b.kind] || a.path.localeCompare(b.path, "en", { numeric: true }));
 function reviewFromStore(launch2, stored2, mediaUrl) {
   const number2 = pullRequestNumber(launch2);
@@ -13950,60 +13835,6 @@ function reviewForApp(launch2, stored2, mediaUrl) {
     return { ...d, ...approved !== void 0 && { approved }, ...preview && { preview } };
   });
   return { app: { ...stored2.app, versions: currentVersions(stored2.drafts) }, drafts: sorted(drafts2) };
-}
-async function readDraftSnapshot(launch2, deps) {
-  const number2 = pullRequestNumber(launch2);
-  if (!number2) return void 0;
-  const { github, launchesRepo } = deps;
-  const [pr, entries, launchYml] = await Promise.all([
-    github.pullRequest(launchesRepo, number2),
-    github.pullRequestFileEntries ? github.pullRequestFileEntries(launchesRepo, number2) : github.pullRequestFiles(launchesRepo, number2).then((paths) => paths.map((path) => ({ path, sha: null }))),
-    // Unreadable is what the page already copes with: it falls back on the drafts' own channels
-    launchConfigText(github, launchesRepo, launch2).catch(() => void 0)
-  ]);
-  const ref = pr.state === "merged" ? "HEAD" : pr.branch;
-  const dir = launchDir(launch2);
-  const files = await Promise.all(
-    entries.map(async ({ path, sha: sha2 }) => ({ path, sha: sha2, content: isText(describe2(path, dir)) ? await github.fileAt(launchesRepo, path, ref) ?? "" : null }))
-  );
-  return {
-    launchId: launch2.id,
-    pullRequest: { number: pr.number, url: pr.url, state: pr.state, branch: pr.branch },
-    headSha: pr.headSha ?? null,
-    launchYml: launchYml ?? null,
-    files
-  };
-}
-function openedSnapshot(launch2, pr, branch, files, launchYml) {
-  const dir = launchDir(launch2);
-  return {
-    launchId: launch2.id,
-    pullRequest: { number: pr.number, url: pr.url, state: "open", branch },
-    headSha: null,
-    launchYml: launchYml ?? null,
-    files: files.map((f) => ({ path: f.path, sha: null, content: isText(describe2(f.path, dir)) && "content" in f ? f.content : null }))
-  };
-}
-var ReviewError = class extends Error {
-};
-async function editDraft(launch2, path, content, deps) {
-  const review = await readReview(launch2, deps);
-  if (!review) throw new ReviewError("this launch has no drafts pull request");
-  if (review.pullRequest?.state !== "open") throw new ReviewError("the pull request is no longer open: its drafts were already decided");
-  const draft2 = review.drafts.find((d) => d.path === path);
-  if (!draft2 || draft2.kind !== "article" && draft2.kind !== "channel") throw new ReviewError(`${path} is not a draft of this launch`);
-  const channel2 = draftOf(path)?.channel;
-  const tooLong2 = draft2.kind === "channel" && channel2 ? pieceLimitProblem(channel2, draftBody(content)) : void 0;
-  if (tooLong2) throw new ReviewError(`${draft2.label}: ${tooLong2}`);
-  await deps.github.updateFile(deps.launchesRepo, review.pullRequest.branch, path, content.endsWith("\n") ? content : `${content}
-`, `Edit ${draft2.label} in Shipcast`);
-}
-async function approveLaunch(launch2, deps) {
-  const number2 = pullRequestNumber(launch2);
-  if (!number2) throw new ReviewError("this launch has no drafts pull request");
-  const pr = await deps.github.pullRequest(deps.launchesRepo, number2);
-  if (pr.state !== "open") throw new ReviewError(`the pull request is ${pr.state}`);
-  return deps.github.mergePullRequest(deps.launchesRepo, number2, `${pr.title} (#${number2})`);
 }
 
 // ../../packages/engine/src/comments.ts
@@ -14320,8 +14151,7 @@ async function runComments(deps, options = {}) {
 }
 function launchReplyContext(deps) {
   return async (launch2) => {
-    const fromRepo = () => packOnLaunchesRepo(deps.github, deps.launchesRepo, launch2);
-    const pack2 = await (deps.stored ? deps.stored.pack(launch2, fromRepo) : fromRepo()).catch(() => void 0);
+    const pack2 = await deps.stored.pack(launch2).catch(() => void 0);
     const postText = {};
     const english = pack2?.article?.en ?? pack2?.article?.es;
     for (const channel2 of COMMENT_CHANNELS) {
@@ -14774,14 +14604,14 @@ async function freshness(registry, now, cadenceHours, cadenceOf) {
 }
 
 // ../../packages/engine/src/repositories/secret-rows.ts
-import { and as and14, eq as eq17, sql as sql17 } from "drizzle-orm";
+import { and as and14, eq as eq16, sql as sql17 } from "drizzle-orm";
 var SecretRows = class {
   #db;
   constructor(db) {
     this.#db = db;
   }
   async get(key) {
-    const [row] = await this.#db.select().from(secrets).where(eq17(secrets.key, key));
+    const [row] = await this.#db.select().from(secrets).where(eq16(secrets.key, key));
     return row;
   }
   /** Writes a row whatever its version; a label left empty keeps the one there */
@@ -14794,11 +14624,11 @@ var SecretRows = class {
   /** Writes only over `version` (0: only if absent); false when another writer got there first */
   async putIfVersion(row, version) {
     if (version === 0) return (await this.#db.insert(secrets).values(row).onConflictDoNothing().returning({ key: secrets.key })).length === 1;
-    const updated = await this.#db.update(secrets).set({ sealed: row.sealed, sealedKey: row.sealedKey, version: sql17`${secrets.version} + 1`, updatedAt: nowIso }).where(and14(eq17(secrets.key, row.key), eq17(secrets.version, version))).returning({ key: secrets.key });
+    const updated = await this.#db.update(secrets).set({ sealed: row.sealed, sealedKey: row.sealedKey, version: sql17`${secrets.version} + 1`, updatedAt: nowIso }).where(and14(eq16(secrets.key, row.key), eq16(secrets.version, version))).returning({ key: secrets.key });
     return updated.length === 1;
   }
   async delete(key) {
-    await this.#db.delete(secrets).where(eq17(secrets.key, key));
+    await this.#db.delete(secrets).where(eq16(secrets.key, key));
   }
   async keys() {
     return (await this.#db.select({ key: secrets.key }).from(secrets)).map((r) => r.key);
@@ -14811,14 +14641,12 @@ var PublishingService = class {
   #github;
   #launchesRepo;
   #attempts;
-  #launchStore;
   #appReview;
   constructor(deps) {
     this.#registry = deps.registry;
     this.#github = deps.github;
     this.#launchesRepo = deps.launchesRepo;
     this.#attempts = deps.attempts ?? deps.registry.attempts;
-    this.#launchStore = deps.launchStore;
     this.#appReview = deps.appReview;
   }
   get attempts() {
@@ -14837,7 +14665,6 @@ var PublishingService = class {
       launchesRepo: this.#launchesRepo,
       guard: new PieceGuard(this.#attempts, holder),
       keepUnpublishable: true,
-      ...this.#launchStore && { launchStore: this.#launchStore },
       ...this.#appReview && { appReview: this.#appReview }
     });
   }
@@ -15059,9 +14886,13 @@ var LaunchService = class {
     if (!launch2) throw new LaunchRefused("not_found", "no such launch");
     return launch2;
   }
-  /** A launch Shipcast holds is reviewed only where the app-review flag is on */
-  #app() {
-    if (!this.#deps.appReview) throw new LaunchRefused("state", "this launch is reviewed in Shipcast, and the app-review flag is off here");
+  /**
+   * A launch drafted to a pull request (before the launch model) is decided on GitHub: since the
+   * pull-request path is gone (docs/decisions/launch-model.md, phase 8) the app neither edits nor
+   * merges it. Every one in production was merged before the import.
+   */
+  #held(launch2) {
+    if (!isAppLaunch(launch2)) throw new LaunchRefused("state", "this launch\u2019s drafts were decided in a pull request: they are no longer edited or approved in Shipcast");
     return this.#deps.appReview;
   }
   get(launchId2) {
@@ -15103,31 +14934,17 @@ var LaunchService = class {
     return claim.launch;
   }
   /**
-   * Saves the owner's edit of one draft as a commit on the pull request's branch (refused, as
-   * ReviewError, when it is not a draft of the launch, the pull request is closed or the text is too
-   * long for its network), then tells the snapshot and the launch model's copy, neither of which can
-   * fail the edit.
+   * Saves the owner's edit of one draft as a new version (refused when it is not a draft of the
+   * launch, a piece already out, or too long for its network); who wrote it (a login, `api`) is kept
    */
   async editDraft(launchId2, path, content, author = null) {
     const launch2 = await this.#launch(launchId2);
-    if (isAppLaunch(launch2)) return this.#app().edit(launch2, path, content, author);
-    await editDraft(launch2, path, content, { github: this.#deps.github, launchesRepo: this.#deps.claims.launchesRepo });
-    const committed = content.endsWith("\n") ? content : `${content}
-`;
-    await this.#deps.drafts?.edited(launch2, path, committed);
-    await this.#deps.launchStore?.edited(launch2, path, committed).catch(() => void 0);
+    return this.#held(launch2).edit(launch2, path, content, author);
   }
-  /**
-   * Approves the drafts: merges their pull request, or for a launch Shipcast holds records the
-   * approval of every draft as it is now; the caller queues the publishing after either
-   */
+  /** Approves the drafts: the approval of every draft as it is now; the caller queues the publishing after it */
   async approve(launchId2, by = "owner", seen2) {
     const launch2 = await this.#launch(launchId2);
-    if (isAppLaunch(launch2)) {
-      await this.#app().approve(launch2, by, seen2);
-      return launch2;
-    }
-    await approveLaunch(launch2, { github: this.#deps.github, launchesRepo: this.#deps.claims.launchesRepo });
+    await this.#held(launch2).approve(launch2, by, seen2);
     return launch2;
   }
 };
@@ -15192,67 +15009,6 @@ var NotificationService = class {
   }
 };
 
-// ../../packages/engine/src/services/drafts.ts
-var RECENT = 500;
-var DraftSnapshotService = class {
-  #deps;
-  constructor(deps) {
-    this.#deps = deps;
-  }
-  get(launchId2) {
-    return this.#deps.registry.drafts.snapshot(launchId2);
-  }
-  /** Reads the pull request from GitHub and rewrites the snapshot; undefined for a launch without one */
-  async refresh(launch2) {
-    const read = await readDraftSnapshot(launch2, { github: this.#deps.github, launchesRepo: this.#deps.launchesRepo });
-    if (!read) return void 0;
-    const saved = await this.#deps.registry.drafts.saveSnapshot(read);
-    await this.#deps.launchStore?.pullRequestRead(launch2, read).catch(() => void 0);
-    return saved;
-  }
-  /**
-   * After the pipeline opened the pull request: the snapshot is the files it pushed. A pull request
-   * that was open already (a re-run) carries what was pushed before, so it is read instead.
-   */
-  async opened(launch2, pr, branch, files) {
-    if (!pr.created) {
-      await this.refresh(launch2);
-      return;
-    }
-    const launchYml = await launchConfigText(this.#deps.github, this.#deps.launchesRepo, launch2).catch(() => void 0);
-    await this.#deps.registry.drafts.saveSnapshot(openedSnapshot(launch2, pr, branch, files, launchYml));
-  }
-  /** After Shipcast committed an edit to one draft */
-  async edited(launch2, path, content) {
-    await this.#deps.registry.drafts.patchSnapshotFile(launch2.id, path, content);
-  }
-  /** The launch whose drafts are in this pull request of the launches repo, whatever its status now */
-  async launchOf(number2) {
-    const repo2 = `/${this.#deps.launchesRepo.toLowerCase()}/pull/`;
-    return (await this.#deps.registry.launches.recent(RECENT)).find((l) => pullRequestNumber(l) === number2 && (l.detail?.toLowerCase().includes(repo2) ?? false));
-  }
-  /**
-   * The poll's safety net for missed deliveries: every launch whose pull request was open when last
-   * read, or was never read, is read again. Conditional reads make an unchanged one cost 304s.
-   */
-  async refreshOpen() {
-    const candidates = (await this.#deps.registry.launches.recent(RECENT)).filter((l) => pullRequestNumber(l) !== void 0 && l.status === "drafted");
-    const known = new Map((await this.#deps.registry.drafts.snapshots(candidates.map((l) => l.id))).map((s) => [s.launchId, s]));
-    const problems = [];
-    let refreshed = 0;
-    for (const launch2 of candidates) {
-      const state = known.get(launch2.id)?.pullRequest.state;
-      if (state !== void 0 && state !== "open") continue;
-      try {
-        if (await this.refresh(launch2)) refreshed++;
-      } catch (error) {
-        problems.push(`${launch2.repo} ${launch2.ref}: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-    return { refreshed, problems };
-  }
-};
-
 // ../../packages/engine/src/media/store.ts
 import { createHash as createHash6 } from "node:crypto";
 var KEY = /^media\/([0-9a-f]{2})\/([0-9a-f]{64})$/;
@@ -15305,17 +15061,6 @@ var LaunchStoreService = class {
   async report(launchId2) {
     const value = await this.#deps.registry.cursors.cursor(launchStoreKey(launchId2));
     return value === void 0 ? void 0 : JSON.parse(value);
-  }
-  /**
-   * The pipeline handed the drafts over: the pack, the channels, a version of each draft and every
-   * file, then the check against what was pushed. Drafts committed straight onto main are approved.
-   */
-  drafted(launch2, delivery) {
-    return this.#checked(launch2, async () => {
-      const { problems, files } = await this.#write(launch2, delivery);
-      if (delivery.direct) await this.#approve(launch2, { by: "shipcast", note: `committed straight onto main as ${delivery.direct.sha}` });
-      return [...problems, ...storeDifferences(launch2, await this.#copy(launch2, files), files)];
-    });
   }
   /**
    * A launch Shipcast holds itself (docs/app-review.md): the shadow write's own write, with no pull
@@ -15383,15 +15128,6 @@ var LaunchStoreService = class {
     return { problems, files };
   }
   /**
-   * The owner edited a draft in Shipcast, which committed it to the pull request: a version of their
-   * own. A failure is added to what the check last reported, which a full check replaces.
-   */
-  edited(launch2, path, content, author = null) {
-    return this.#editStored(launch2, path, async (stored2) => {
-      await this.#version(launch2.id, await this.#store.drafts(launch2.id), { ...stored2, path, body: content, origin: "owner", author });
-    });
-  }
-  /**
    * A published article was edited (Edit on the launch page, committed to the launches repo's main):
    * a `post-publish-edit` version, so the copy stays what the site shows, and the article's post now
    * names that version. Reported like an edit when it cannot be stored.
@@ -15416,44 +15152,6 @@ var LaunchStoreService = class {
       return [problem];
     }
   }
-  /**
-   * The pull request was read from GitHub (the drafts snapshot's refresh, or the check at the merge):
-   * each draft changed on it becomes a version of the owner's, a merge is the approval, and the rows
-   * are checked against it. A launch the shadow write never stored is left alone.
-   */
-  async pullRequestRead(launch2, read) {
-    if (!await this.#holds(launch2).catch(() => false)) return [];
-    return this.#checked(launch2, async () => {
-      const current = await this.#store.drafts(launch2.id);
-      for (const file of read.files) {
-        const stored2 = storedFile(launch2, file.path);
-        if (stored2.kind !== "draft" || file.content === null) continue;
-        if (current.some((d) => d.channel === stored2.channel && d.piece === stored2.piece)) {
-          await this.#version(launch2.id, current, { ...stored2, path: file.path, body: file.content, origin: "owner" });
-        }
-      }
-      if (read.pullRequest.state === "merged" && !await this.#store.approval(launch2.id)) {
-        const pr = await this.#deps.github.pullRequest(this.#deps.launchesRepo, read.pullRequest.number);
-        await this.#approve(launch2, { by: pr.mergedBy ?? "pull-request", ...pr.mergedAt && { at: pr.mergedAt }, note: `merged ${read.pullRequest.url}` });
-      }
-      return storeDifferences(launch2, await this.#copy(launch2, read.files), read.files, read.launchYml);
-    });
-  }
-  /**
-   * The drafts were found approved, as publishing finds them before it sends anything: a merged pull
-   * request is read once, for its approval and the check, whether or not the snapshot is on.
-   */
-  async merged(launch2) {
-    try {
-      if (launch2.detail?.startsWith("direct:") || !pullRequestNumber(launch2) || !await this.#holds(launch2) || await this.#store.approval(launch2.id)) return [];
-      const read = await readDraftSnapshot(launch2, { github: this.#deps.github, launchesRepo: this.#deps.launchesRepo });
-      return read ? await this.pullRequestRead(launch2, read) : [];
-    } catch (error) {
-      const problem = `the pull request could not be read for the check: ${error instanceof Error ? error.message : String(error)}`;
-      await this.#report(launch2.id, [problem]).catch(() => void 0);
-      return [problem];
-    }
-  }
   /** A launch the shadow write stored: one with a pack */
   async #holds(launch2) {
     return await this.#store.currentPack(launch2.id) !== void 0;
@@ -15465,26 +15163,6 @@ var LaunchStoreService = class {
     const { versionId } = await this.#store.addVersion(launchId2, { channel: input.channel, piece: input.piece, body: input.body, fields: { path: input.path }, origin: input.origin, author: input.author ?? null, packId: input.packId ?? null });
     return versionId;
   }
-  async #approve(launch2, input) {
-    const versions = Object.fromEntries((await this.#store.drafts(launch2.id)).map((d) => [String(d.id), d.versionId]));
-    await this.#store.approveOnce(launch2.id, { ...input, versions });
-  }
-  async #copy(launch2, files) {
-    const shared = files.map((f) => storedFile(launch2, f.path)).flatMap((s) => s.kind === "media" && s.shared ? [s.publicPath] : []);
-    const [pack2, channels3, drafts2, media2] = await Promise.all([this.#store.currentPack(launch2.id), this.#store.channels(launch2.id), this.#store.drafts(launch2.id), this.#store.media(launch2.id, shared)]);
-    return { pack: pack2, channelsSource: channels3.source, drafts: drafts2, media: media2 };
-  }
-  /** Runs a full write or check and reports what it found, replacing the report before; a failure is reported, never thrown */
-  async #checked(launch2, work) {
-    let differences;
-    try {
-      differences = await work();
-    } catch (error) {
-      differences = [`the shadow write failed: ${error instanceof Error ? error.message : String(error)}`];
-    }
-    await this.#report(launch2.id, differences).catch(() => void 0);
-    return differences;
-  }
   async #report(launchId2, differences) {
     const key = launchStoreKey(launchId2);
     if (differences.length === 0) await this.#deps.registry.cursors.deleteCursor(key);
@@ -15494,10 +15172,15 @@ var LaunchStoreService = class {
 
 // ../../packages/engine/src/services/launch-import.ts
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { isDeepStrictEqual as isDeepStrictEqual2 } from "node:util";
+import { isDeepStrictEqual } from "node:util";
 
 // ../../packages/engine/src/services/launch-read.ts
 var launchMediaPath = (row) => `/media/${row.id}`;
+var LaunchNotHeld = class extends ShipcastError {
+  constructor(launch2) {
+    super(`launch ${launch2.id} is not held by Shipcast: its drafts are only in its pull request (${launch2.detail?.split("\n")[0] ?? "unknown"}); import it with scripts/import-launches.ts --apply`, { code: "not_held", httpStatus: 409 });
+  }
+};
 var LaunchReadService = class {
   #deps;
   constructor(deps) {
@@ -15507,30 +15190,33 @@ var LaunchReadService = class {
     return this.#deps.registry.launchStore;
   }
   /** The launch's drafts as the page and the REST API show them: each piece's current version, the launch's files */
-  async review(launch2, otherwise) {
+  async review(launch2) {
     if (isAppLaunch(launch2)) return this.#appReview(launch2);
     const pack2 = await this.#store.currentPack(launch2.id);
-    if (!pack2) return otherwise();
+    if (!pack2) {
+      if (pullRequestNumber(launch2) !== void 0) throw new LaunchNotHeld(launch2);
+      return void 0;
+    }
     const [drafts2, media2, channels3, approval2] = await Promise.all([this.#store.drafts(launch2.id), this.#store.media(launch2.id), this.#store.channels(launch2.id), this.#store.approval(launch2.id)]);
     return reviewFromStore(launch2, { drafts: drafts2, media: media2, hasPack: true, channelsSource: channels3.source, approved: approval2 !== void 0 }, launchMediaPath);
   }
   /**
    * The channels the launch publishes on, as launch.yml says them: the one copied when it was drafted,
    * each channel's mode from its row (the import turned off the channels that never published).
-   * Undefined when no channels were stored, as when launch.yml cannot be read.
+   * Undefined when no channels were stored, as when launch.yml cannot be read, or the launch is not held.
    */
-  async channelConfig(launch2, otherwise) {
-    if (!await this.#store.currentPack(launch2.id)) return otherwise();
+  async channelConfig(launch2) {
+    if (!await this.#store.currentPack(launch2.id)) return void 0;
     return storedChannelConfig(await this.#store.channels(launch2.id));
   }
   /**
    * The launch's current pack, what replies and the writing assistant are grounded in. A pack written
    * before a channel was retired is read without it, as the import reads it; undefined when even so it
-   * does not parse.
+   * does not parse, or the launch is not held.
    */
-  async pack(launch2, otherwise) {
+  async pack(launch2) {
     const stored2 = await this.#store.currentPack(launch2.id);
-    if (!stored2) return otherwise();
+    if (!stored2) return void 0;
     const parsed = ContentPack.safeParse(readPack(stored2.pack).pack);
     return parsed.success ? parsed.data : void 0;
   }
@@ -18351,71 +18037,33 @@ import { readFileSync as readFileSync4 } from "node:fs";
 
 // ../../packages/runtime/src/flags.ts
 var FLAGS = {
-  /**
-   * Launch model (docs/decisions/launch-model.md), phase 1: the media store on Cloudflare R2, built
-   * from SHIPCAST_MEDIA_* in .env. Off, the store refuses every call; nothing calls it yet
-   */
-  "launch-media": "Launch media in the R2 media store",
-  /**
-   * Launch model, phase 2: the drafts pull request's pack, channels, drafts (as versions), media and
-   * merge are also written to the launch model's tables and checked against it (docs/launch-store.md).
-   * Read only with `launch-store-read`; its media need `launch-media` too
-   */
-  "launch-store": "Launch model shadow write beside the drafts pull request",
-  /**
-   * Launch model, phase 3: scripts/import-launches.ts may write (docs/launch-import.md): import the
-   * launches drafted before the shadow write, delete the ones decided, roll a batch back. Off, it only
-   * plans and verifies; the app never reads it
-   */
-  "launch-import": "Import of the existing launches into the launch model (scripts/import-launches.ts)",
-  /**
-   * Launch model, phase 4: the launch page, the REST API (and MCP), scheduling's channels and the
-   * reply and writing assistants' grounding read the launch model's tables instead of GitHub
-   * (docs/launch-store-read.md); a launch they do not hold is read as before. Needs `launch-store`,
-   * which keeps them up to date, and `launch-media` for its files
-   */
-  "launch-store-read": "Launches read from the launch model instead of GitHub",
-  /**
-   * Launch model, phase 5: a new launch has no pull request. Its drafts are reviewed, edited (as
-   * versions), previewed and approved in the app, `auto` channels go out without approval, and the
-   * article and its media reach the launches repo as one commit when it is published
-   * (docs/app-review.md). Needs `launch-store-read` (with `launch-store`) and `launch-media`
-   */
-  "app-review": "Launches reviewed and approved in the app, with no pull request",
-  /**
-   * Launch model, phase 6: a launch made from sources (text, URLs, several repos, uploaded media),
-   * a launch.yml's `sources` read when its release triggers it, and stars read per repo. Off, a
-   * launch is its one repo as before and `sources` in a launch.yml is parsed and ignored
-   */
-  "launch-sources": "Launches made from sources: text, URLs, several repos and uploaded media",
-  /**
-   * Launch model, phase 7: the owner's trigger rules (a setting) decide which GitHub events create a
-   * launch, a repo with no launch.yml can be launched on a rule's channels, and each claim carries its
-   * dedupe key (docs/launch-triggers.md). Off, each repo's launch.yml decides alone, as before
-   */
-  "launch-triggers": "Launches created by the trigger rules in Settings, launch.yml optional",
-  /**
-   * Launch model, phase 7: a launch can be deleted (docs/launch-delete.md): one never published is
-   * removed, a published one hidden, its posts kept on the networks unless the owner picks channels
-   * to delete them on; an event never launches a removed launch's release again
-   */
-  "launch-delete": "Launches deleted from the app and the API",
   /** SHP-4: the blog's visits per launch and channel from Umami, until the Umami instance exists */
   umami: "Blog visits by UTM source and campaign from Umami"
 };
 var RETIRED = /* @__PURE__ */ new Set([
   // The AI task runner is the only AI layer (docs/decisions/ai-layer.md)
   "ai-runner",
-  // The performance refactor (docs/plans/performance-refactor.md), on in production since 2026-10-29:
-  // every publish through PublishingService, the secrets table selectable, Redis and BullMQ whenever
-  // SHIPCAST_REDIS_QUEUE_URL is set, GitHub by events, the hourly metrics, the pages over server-sent events
+  // The performance refactor (docs/plans/performance-refactor.md): every publish through PublishingService,
+  // the secrets table selectable, Redis and BullMQ whenever SHIPCAST_REDIS_QUEUE_URL is set, GitHub by
+  // events, the hourly metrics and the pages over server-sent events
   "publishing-service",
   "secrets-table",
   "redis-state",
   "bullmq",
   "github-events",
   "batched-metrics",
-  "realtime-ui"
+  "realtime-ui",
+  // The launch model (docs/decisions/launch-model.md): every launch held by Shipcast, its media in the
+  // media store, made from sources, by the trigger rules, deletable
+  "launch-media",
+  "launch-store",
+  "launch-store-read",
+  "app-review",
+  "launch-sources",
+  "launch-triggers",
+  "launch-delete",
+  // The import's write is `--apply` alone (scripts/import-launches.ts)
+  "launch-import"
 ]);
 var Flags = class _Flags {
   #on;
@@ -18622,7 +18270,7 @@ async function publishOne(launch2, d, services) {
   const log = d.log ?? (() => {
   });
   const connectors = publishConnectors(services);
-  const result = await publishLaunch(launch2, d.brand, { github: d.github, registry: d.registry, launchesRepo: d.pipeline.launchesRepo, ...connectors, ...d.pipeline.launchStore && { launchStore: d.pipeline.launchStore }, ...d.pipeline.appReview && { appReview: d.pipeline.appReview } });
+  const result = await publishLaunch(launch2, d.brand, { github: d.github, registry: d.registry, launchesRepo: d.pipeline.launchesRepo, ...connectors, ...d.pipeline.appReview && { appReview: d.pipeline.appReview } });
   if (result.state === "published" || result.state === "partial") {
     for (const p of result.posted) log(`${name(launch2)} on ${p.channel}: ${p.url}`);
     for (const p of result.problems) log(`${name(launch2)}: ${p}`);
@@ -18875,8 +18523,6 @@ var QUEUES = {
   // The measurement (docs/plans/performance-refactor.md, phase 0): no retries, the next hour's run is the retry
   checks: { title: "Checking freshness and correctness", policy: "stately", retryLimit: 0, expireInSeconds: 10 * 60, concurrency: 1 },
   probe: { title: "Timing the pages", policy: "stately", retryLimit: 0, expireInSeconds: 10 * 60, concurrency: 1 },
-  // One per pull request (its key): a burst of pushes to it is one read, of the latest state
-  "drafts-snapshot": { title: "Reading a drafts pull request", policy: "stately", retryLimit: 2, retryDelay: 60, expireInSeconds: 5 * 60, concurrency: 2 },
   // A clone and an agent's run for a page that waits: no retries, the owner asks again; the AI's own timeout is 30 minutes
   "assistant-check": { title: "Checking a text against the code", policy: "standard", retryLimit: 0, expireInSeconds: 45 * 60, concurrency: 2 }
 };
@@ -19134,9 +18780,7 @@ var QUEUE_ROLES = {
   metrics: "worker",
   "instagram-tokens": "worker",
   snapshots: "worker",
-  checks: "worker",
-  // A pull request's drafts read again after a webhook: GitHub reads, no AI
-  "drafts-snapshot": "worker"
+  checks: "worker"
 };
 function roleFromEnv(env) {
   const value = env.SHIPCAST_ROLE?.trim() || "all";
@@ -19239,11 +18883,6 @@ async function takeGitHubPoll(registry, now = /* @__PURE__ */ new Date()) {
   if (Number.isFinite(last) && now.getTime() - last < GITHUB_POLL_MS) return false;
   await registry.cursors.setCursor(GITHUB_POLL_KEY, now.toISOString());
   return true;
-}
-async function pollGitHub(d) {
-  if (d.launchesRepo) await d.files?.forget(d.launchesRepo);
-  const { refreshed, problems } = await d.drafts.refreshOpen();
-  return [`GitHub poll: ${refreshed} drafts pull requests read`, ...problems.map((p) => `  ${p}`)];
 }
 
 // ../../packages/runtime/src/settings.ts
@@ -19517,10 +19156,9 @@ function replyDeps(d) {
     aiRunner: d.pipeline.aiRunner,
     texts: d.pipeline.aiTexts ?? (async () => ({})),
     context: launchReplyContext({
-      github: d.pipeline.github,
-      launchesRepo: d.pipeline.launchesRepo,
       checkout: d.pipeline.checkout,
-      stored: d.pipeline.launchRead
+      // The runtime's pipeline always reads the launch model; one without it grounds no reply in a pack
+      stored: d.pipeline.launchRead ?? { pack: async () => void 0 }
     })
   };
 }
@@ -19572,7 +19210,7 @@ var resultKey = (jobId) => `${RESULT_PREFIX}${jobId}`;
 async function runAssistantCheck(d, data, job) {
   const launch2 = await d.registry.launches.get(data.launchId);
   if (!launch2) throw new AssistantRefused(`there is no launch ${data.launchId}`);
-  const grounding = await launchGrounding(launch2, { github: d.pipeline.github, launchesRepo: d.pipeline.launchesRepo, stored: d.pipeline.launchRead });
+  const grounding = await launchGrounding(launch2, { stored: d.pipeline.launchRead ?? { pack: async () => void 0 } });
   if (grounding.kind !== "launch" || !grounding.launch) throw new AssistantRefused("an article has no code to check against: the article itself is the truth");
   const texts = await d.pipeline.aiTexts?.() ?? {};
   const checkout2 = await d.pipeline.checkout(launch2.repo, launchCodeRef(launch2));
@@ -19644,8 +19282,7 @@ async function scheduleRound(queue, reason, inSeconds = 0) {
 }
 function workHandlers(queue, d) {
   const { registry } = d;
-  const flags = d.flags ?? new Flags();
-  const publishing = new PublishingService({ registry, github: d.github, launchesRepo: d.pipeline.launchesRepo, ...d.pipeline.launchStore && { launchStore: d.pipeline.launchStore }, ...d.pipeline.appReview && { appReview: d.pipeline.appReview } });
+  const publishing = new PublishingService({ registry, github: d.github, launchesRepo: d.pipeline.launchesRepo, ...d.pipeline.appReview && { appReview: d.pipeline.appReview } });
   const servicesFor = d.services ?? ((brand) => buildServices({ env: d.env, brand, registry, github: d.github, secrets: d.secrets }));
   const cache = d.cache ?? new MemoryCache();
   const etags = d.etags ?? new MemoryEtagCache();
@@ -19658,7 +19295,7 @@ function workHandlers(queue, d) {
   const publishWhatIsReady = async (drafted) => {
     if (drafted.model === "app" && (await publishing.approval(drafted)).state === "approved") await startPublishing(queue, drafted);
   };
-  const withRepos = (services) => flags.on("launch-sources") ? { ...services, sources: { ...services.sources, furtherRepos: (ids2) => registry.sources.furtherRepos(ids2) } } : services;
+  const withRepos = (services) => ({ ...services, sources: { ...services.sources, furtherRepos: (ids2) => registry.sources.furtherRepos(ids2) } });
   const off = async (reason) => reason !== BY_HAND && (await readAutomation(registry)).mode === "off";
   return {
     async draft({ launchId: launchId2, direct }, job) {
@@ -19737,8 +19374,8 @@ function workHandlers(queue, d) {
     /*
      * A scheduled piece's time has come: the launch's publishing is queued, and the publish step
      * sends what is due. The post row is the truth, so a job for a piece cancelled, moved later or
-     * already out does nothing; a launch whose drafts still wait for approval waits, and its merge
-     * publishes what is overdue by then.
+     * already out does nothing; a launch whose drafts still wait for approval waits in its publish
+     * job, and its approval publishes what is overdue by then.
      */
     async scheduled({ postId: postId2, launchId: launchId2 }, job) {
       job.link(pageOf(launchId2));
@@ -19757,30 +19394,10 @@ function workHandlers(queue, d) {
         job.log(`Waiting: the launch is ${current.status}; its publishing sends what is due`);
         return;
       }
-      const number2 = pullRequestNumber(current);
-      if (number2 && await d.github.pullRequestState(d.pipeline.launchesRepo, number2) === "open") {
-        job.log("Waiting for approval: it goes out once the drafts are merged");
-        return;
-      }
       job.log(`${post.channel} is due: publishing ${nameOf2(current)}`);
       await startPublishing(queue, current);
     },
-    /** GitHub said a drafts pull request changed: its snapshot is read again, off the webhook's request */
-    async "drafts-snapshot"({ pullRequest }, job) {
-      if (!d.drafts) {
-        job.log("This process keeps no drafts snapshot: nothing to read");
-        return;
-      }
-      const launch3 = await d.drafts.launchOf(pullRequest);
-      if (!launch3) {
-        job.log(`Pull request #${pullRequest} is not one of Shipcast's launches`);
-        return;
-      }
-      job.link(pageOf(launch3.id));
-      const snapshot = await d.drafts.refresh(launch3);
-      job.log(snapshot ? `Read #${pullRequest}: ${snapshot.pullRequest.state}, ${snapshot.files.length} files` : "The launch has no drafts pull request");
-    },
-    /** A delivery's work: what GitHub announced is claimed and drafted, or a merged launch published */
+    /** A delivery's work: what GitHub announced is claimed and drafted */
     async delivery({ action }, job) {
       if (action.kind === "claim") {
         const outcome = await claimFromWebhook({ github: d.github, registry, brand: await d.brand(), pipeline: d.pipeline }, action.event);
@@ -19793,14 +19410,7 @@ function workHandlers(queue, d) {
         await startDrafting(queue, outcome.launch);
         return;
       }
-      const merged = await launchOfPullRequest({ registry }, action.pullRequestUrl);
-      if (!merged) {
-        job.log("A merge Shipcast has no drafted launch for");
-        return;
-      }
-      job.log(`Publishing ${nameOf2(merged)}`);
-      job.link(pageOf(merged.id));
-      await startPublishing(queue, merged);
+      job.log("Ignored: a merged pull request publishes nothing; launches are approved in Shipcast");
     },
     /*
      * A round, then the next one, an interval later: the chain reads the settings at every link, so a
@@ -19844,7 +19454,7 @@ function workHandlers(queue, d) {
             }
           }
         );
-        if (polling && d.drafts) for (const line of await pollGitHub({ drafts: d.drafts, files: d.github.files, launchesRepo: d.pipeline.launchesRepo })) log(line);
+        if (polling && d.pipeline.launchesRepo) await d.github.files?.forget(d.pipeline.launchesRepo);
       } finally {
         await record(registry, LAST_ROUND_KEY, {
           at: (/* @__PURE__ */ new Date()).toISOString(),
@@ -20205,11 +19815,32 @@ var GitHubUserTokens = class {
   }
 };
 
+// ../../packages/runtime/src/preview/guard.ts
+function databaseName(url) {
+  if (!url) return void 0;
+  try {
+    return decodeURIComponent(new URL(url).pathname.replace(/^\//, ""));
+  } catch {
+    return void 0;
+  }
+}
+function previewDatabase(url) {
+  return /_preview$/.test(databaseName(url) ?? "");
+}
+function fakeNetworks(env = process.env) {
+  if (env.SHIPCAST_PREVIEW_FAKE_NETWORKS !== "1") return false;
+  if (env.SHIPCAST_APP_TLS === "off") return true;
+  return env.SHIPCAST_APP_TLS === "proxy" && previewDatabase(env.SHIPCAST_DATABASE_URL);
+}
+
 // ../../packages/runtime/src/media.ts
-function mediaStoreFor(flags, env, options = {}) {
-  if (!flags.on("launch-media")) return unavailableMediaStore("the launch-media flag is off (SHIPCAST_FLAGS)");
+function mediaStoreFor(env, options = {}) {
   const config = loadMediaStoreConfig(env);
-  if (!config) return unavailableMediaStore(`missing in .env: ${MEDIA_STORE_VARIABLES.join(", ")} (see .env.example)`);
+  if (!config) {
+    const missing = `missing in .env: ${MEDIA_STORE_VARIABLES.join(", ")} (see .env.example)`;
+    if (env.SHIPCAST_APP_TLS === "proxy" && !fakeNetworks(env)) throw new ConfigError(`the media store is required on a server: ${missing}`);
+    return unavailableMediaStore(missing);
+  }
   const { region, ...bucket } = config;
   return new R2MediaStore({ ...bucket, ...region && { region } }, options.fetch ? { fetch: options.fetch } : {});
 }
@@ -20301,12 +19932,6 @@ function withEvents(registry, bus, log = (line) => console.error(line)) {
         if (result.claimed) launch2(result.launch.id);
       },
       setStatus: ([id]) => launch2(id)
-    }),
-    drafts: tapped(registry.drafts, {
-      saveSnapshot: (_args, result) => launch2(result.launchId),
-      patchSnapshotFile: ([launchId2], changed) => {
-        if (changed) launch2(launchId2);
-      }
     }),
     // A channel's failure is a cursor: the launch page and the bell show it
     cursors: tapped(registry.cursors, {
@@ -20545,7 +20170,7 @@ async function createRuntime(options) {
   const env = options.env ?? process.env;
   const log = options.log ?? (() => void 0);
   const config = loadConfig(env, options.root);
-  const flags = options.flags ?? Flags.fromEnv(env);
+  void (options.flags ?? Flags.fromEnv(env));
   const opened = options.registry ?? await connectRepositories(config.databaseUrl, poolOptions(env));
   const announced = options.events ? withEvents(opened, options.events) : void 0;
   const registry = announced?.registry ?? opened;
@@ -20572,20 +20197,17 @@ async function createRuntime(options) {
   const access2 = app ? { kind: "app", slug: app.slug, bot: app.slug ? `${app.slug}[bot]` : void 0 } : { kind: "token" };
   const userTokens = app ? new GitHubUserTokens({ secrets: secrets2, lock: new PostgresLock(registry.database), client: { clientId: app.clientId, clientSecret: app.clientSecret, ...options.fetch && { fetch: options.fetch } } }) : void 0;
   const brand = async () => loadBrand(github, settings2.launchesRepo());
-  const media2 = mediaStoreFor(flags, env, { ...options.fetch && { fetch: options.fetch } });
-  const launchStore = flags.on("launch-store") ? new LaunchStoreService({
+  const media2 = options.media ?? mediaStoreFor(env, { ...options.fetch && { fetch: options.fetch } });
+  const launchStore = new LaunchStoreService({
     registry,
     media: media2,
     github,
     get launchesRepo() {
       return settings2.current().launchesRepo ?? "";
     }
-  }) : void 0;
-  if (flags.on("launch-store-read") && !launchStore) throw new ConfigError("the launch-store-read flag needs launch-store, which keeps the launch model up to date");
-  const launchRead = flags.on("launch-store-read") ? new LaunchReadService({ registry, media: media2, site: async () => (await brand()).site }) : void 0;
-  if (flags.on("app-review") && !launchRead) throw new ConfigError("the app-review flag needs launch-store-read (and launch-store), which keep and read the launches Shipcast holds");
-  if (flags.on("app-review") && !flags.on("launch-media")) throw new ConfigError("the app-review flag needs launch-media: a launch Shipcast holds keeps its media in the media store");
-  const appReview = flags.on("app-review") && launchStore ? new AppReviewService({
+  });
+  const launchRead = new LaunchReadService({ registry, media: media2, site: async () => (await brand()).site });
+  const appReview = new AppReviewService({
     registry,
     media: media2,
     github,
@@ -20593,17 +20215,9 @@ async function createRuntime(options) {
     get launchesRepo() {
       return settings2.current().launchesRepo ?? "";
     }
-  }) : void 0;
-  const triggers = flags.on("launch-triggers") ? new TriggerService({ registry, inTransaction: (work) => inTransaction(registry, work) }) : void 0;
-  const removed = (dedupeKey) => registry.launchDeletions.removed(dedupeKey);
-  const drafts2 = new DraftSnapshotService({
-    github,
-    registry,
-    get launchesRepo() {
-      return settings2.current().launchesRepo ?? "";
-    },
-    ...launchStore && { launchStore }
   });
+  const triggers = new TriggerService({ registry, inTransaction: (work) => inTransaction(registry, work) });
+  const removed = (dedupeKey) => registry.launchDeletions.removed(dedupeKey);
   const aiDeps = {
     env,
     registry,
@@ -20628,22 +20242,18 @@ async function createRuntime(options) {
     },
     // Beside other processes each job clones into a folder of its own, removed at its end
     checkout: (repo2, ref) => checkout({ ...workspace, perJob: split(roleFromEnv(env)) }, repo2, ref),
-    drafts: drafts2,
-    ...launchStore && { launchStore },
-    ...launchRead && { launchRead },
-    ...appReview && { appReview },
-    // Phase 6 of the launch model: a launch made from sources, its bundle in a folder of the job's own
-    ...flags.on("launch-sources") && {
-      sources: {
-        store: registry.sources,
-        launches: registry.launches,
-        folder: (name2) => jobFolder({ ...workspace, perJob: split(roleFromEnv(env)) }, name2),
-        clone: (repo2, ref, hostPath, sha2) => cloneInto(workspace, repo2, ref, hostPath, sha2),
-        archive: archiveFolder,
-        fetchPage: pageFetcher()
-      }
+    launchRead,
+    appReview,
+    // A launch made from sources, its bundle in a folder of the job's own
+    sources: {
+      store: registry.sources,
+      launches: registry.launches,
+      folder: (name2) => jobFolder({ ...workspace, perJob: split(roleFromEnv(env)) }, name2),
+      clone: (repo2, ref, hostPath, sha2) => cloneInto(workspace, repo2, ref, hostPath, sha2),
+      archive: archiveFolder,
+      fetchPage: pageFetcher()
     },
-    ...triggers && { triggers },
+    triggers,
     removed
   };
   return {
@@ -20664,7 +20274,6 @@ async function createRuntime(options) {
     // brand.yml is read through the file cache, which a push to it (or the hourly poll) forgets
     invalidateBrand: () => void 0,
     githubCaches: caches,
-    drafts: drafts2,
     flushEvents: async () => {
       await announced?.flush();
     },
@@ -21205,24 +20814,6 @@ import { pino, stdSerializers, stdTimeFunctions } from "pino";
 import { randomBytes as randomBytes8 } from "node:crypto";
 var encoder = new TextEncoder();
 var RING_MS = 5 * 6e4;
-
-// ../../packages/runtime/src/preview/guard.ts
-function databaseName(url) {
-  if (!url) return void 0;
-  try {
-    return decodeURIComponent(new URL(url).pathname.replace(/^\//, ""));
-  } catch {
-    return void 0;
-  }
-}
-function previewDatabase(url) {
-  return /_preview$/.test(databaseName(url) ?? "");
-}
-function fakeNetworks(env = process.env) {
-  if (env.SHIPCAST_PREVIEW_FAKE_NETWORKS !== "1") return false;
-  if (env.SHIPCAST_APP_TLS === "off") return true;
-  return env.SHIPCAST_APP_TLS === "proxy" && previewDatabase(env.SHIPCAST_DATABASE_URL);
-}
 
 // ../../packages/runtime/src/preview/fixtures.ts
 import { existsSync as existsSync3, mkdirSync, readFileSync as readFileSync6, statSync, writeFileSync } from "node:fs";
@@ -22611,29 +22202,6 @@ import { z as z23 } from "zod";
 var guide8 = "Sources and whole launches: upload_media stores an image, then launch_from_sources drafts a launch from text, pages, repos and images for approve_drafts. edit_launch_posts and delete_launch_posts change every live post of a launch; plan_launch_deletion shows what delete_launch would do, before it.";
 var MAX_UPLOAD_BYTES2 = 20 * 1024 * 1024;
 var MAX_BASE64_CHARS = Math.ceil(MAX_UPLOAD_BYTES2 / 3) * 4;
-var FLAGS3 = {
-  sources: {
-    what: "Launching from sources",
-    flag: "launch-sources",
-    off: (error) => error.status === 409 && /not available in this process/.test(error.message)
-  },
-  deletion: {
-    what: "Deleting launches",
-    flag: "launch-delete",
-    off: (error) => error.status === 404 && /launch-delete flag/.test(error.message)
-  }
-};
-async function unlessOff(feature, call) {
-  try {
-    return await call;
-  } catch (error) {
-    const { what, flag, off } = FLAGS3[feature];
-    if (error instanceof ShipcastApiError && off(error)) {
-      throw new ToolRefused(`${what} is turned off on this Shipcast: its ${flag} feature flag is off (SHIPCAST_FLAGS). Nothing was changed. Tell the user; only the owner can turn it on, so do not retry.`);
-    }
-    throw error;
-  }
-}
 function imageBytes(data) {
   const base64 = data.replace(/^data:[^,]*;base64,/i, "").replace(/\s+/g, "").replace(/-/g, "+").replace(/_/g, "/");
   if (base64.length > MAX_BASE64_CHARS) throw new ToolRefused("Nothing was uploaded: the image is larger than the 20 MiB Shipcast takes. Ask the user for a smaller file.");
@@ -22700,7 +22268,7 @@ var tools8 = [
         }
       });
       const body = { title: args.title, lang: args.lang ?? "en", channels: args.channels ?? [], sources };
-      return accepted(await unlessOff("sources", api.call("POST", "/launches/sources", { body })), `Launching "${args.title}" from ${sources.length} source${sources.length === 1 ? "" : "s"}`);
+      return accepted(await api.call("POST", "/launches/sources", { body }), `Launching "${args.title}" from ${sources.length} source${sources.length === 1 ? "" : "s"}`);
     }
   }),
   tool3({
@@ -22715,7 +22283,7 @@ var tools8 = [
     hints: HINTS.setting,
     run: async (api, args) => {
       const bytes = imageBytes(args.image_base64);
-      const answer = await unlessOff("sources", api.call("POST", "/media", { raw: { bytes, contentType: "application/octet-stream" } }));
+      const answer = await api.call("POST", "/media", { raw: { bytes, contentType: "application/octet-stream" } });
       return { ...answer, note: `Name this image in launch_from_sources as { kind: "media", sha256: "${answer.file.sha256}" }, with a name and alt text.` };
     }
   }),
@@ -22769,7 +22337,7 @@ var tools8 = [
     operations: ["planLaunchDeletion"],
     input: z23.object({ launch_id: launchId }),
     hints: HINTS.read,
-    run: (api, args) => unlessOff("deletion", api.call("GET", `/launches/${args.launch_id}/deletion`))
+    run: (api, args) => api.call("GET", `/launches/${args.launch_id}/deletion`)
   }),
   tool3({
     name: "delete_launch",
@@ -22784,7 +22352,7 @@ var tools8 = [
     hints: HINTS.destructive,
     run: (api, args) => {
       requireConfirm(args.confirm, "delete_launch", `Deleting launch ${args.launch_id}`);
-      return unlessOff("deletion", api.call("DELETE", `/launches/${args.launch_id}`, { query: { channels: csv(args.channels) } }));
+      return api.call("DELETE", `/launches/${args.launch_id}`, { query: { channels: csv(args.channels) } });
     }
   })
 ];
@@ -24167,7 +23735,7 @@ GitHub: the App${access2.slug ? ` ${access2.slug}` : ""}, ${installation}; commi
         }
         let claimed;
         try {
-          ({ launch: claimed } = await new LaunchService({ launches: registry.launches, claims: deps, github }).claimManual(repo2, values2.ref, loadBrandNow, reportPreflight));
+          ({ launch: claimed } = await new LaunchService({ launches: registry.launches, claims: deps, github, appReview: runtime.appReview }).claimManual(repo2, values2.ref, loadBrandNow, reportPreflight));
         } catch (error) {
           if (!(error instanceof LaunchRefused)) throw error;
           const found = error.launch;
@@ -24205,7 +23773,7 @@ GitHub: the App${access2.slug ? ` ${access2.slug}` : ""}, ${installation}; commi
           await writeAutomation(registry, { ...await readAutomation(registry), intervalSeconds: Math.max(MIN_INTERVAL_SECONDS, seconds) });
         }
         const automation = await readAutomation(registry);
-        const flags = Flags.fromEnv(process.env);
+        Flags.fromEnv(process.env);
         const role = roleFromEnv(process.env);
         if (role === "web") {
           console.error("watch works queues: SHIPCAST_ROLE=web never does (worker, heavy or all)");
@@ -24213,7 +23781,7 @@ GitHub: the App${access2.slug ? ` ${access2.slug}` : ""}, ${installation}; commi
         }
         const proc = processState(process.env, `watch-${role}`);
         const queue = jobQueue({ registry, databaseUrl: config.databaseUrl, redis: proc.redis, options: { instanceName: "watch", telemetry: telemetry2, schedule: runsTheClock(role), supervise: runsTheClock(role), reconcileAtStart: !split(role), poolMax: queuePoolMax(process.env) } });
-        await startWorking(queue, { env: process.env, registry, github, secrets: secrets2, pipeline: deps, brand: loadBrandNow, refresh: runtime.refresh, flags, drafts: runtime.drafts }, { firstRoundInSeconds: 0, role });
+        await startWorking(queue, { env: process.env, registry, github, secrets: secrets2, pipeline: deps, brand: loadBrandNow, refresh: runtime.refresh }, { firstRoundInSeconds: 0, role });
         const stopMaintenance = runsTheClock(role) && (split(role) || proc.redis) ? startMaintenance({ queue, lock: proc.redis ? new RedisLock(proc.redis.queue) : proc.shared.lock, reconcileRows: split(role) }) : void 0;
         console.log(`Working Shipcast's job queue for ${brand.github}'s releases and ${deps.launchesRepo}: ${automation.mode} mode, a round every ${automation.intervalSeconds} s. Ctrl+C to stop.`);
         if (automation.mode === "off") console.log("Automation is off (in the app's Automation page): no rounds run until it is turned on; jobs sent by hand still do.");
