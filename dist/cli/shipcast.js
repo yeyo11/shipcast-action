@@ -4781,10 +4781,11 @@ var trimSlash = (url) => url.replace(/\/+$/, "");
 var DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5";
 var self = { id: "anthropic", name: "Anthropic API", settings: [{ key: "apiKey", label: "API key", secret: true }] };
 var EPHEMERAL = { anthropic: { cacheControl: { type: "ephemeral" } } };
+var ANTHROPIC_STRICT_LIMITS = { optionalParams: 24, unionParams: 16 };
 var anthropicAiProvider = aiProvider({
   ...self,
   listed: true,
-  capabilities: { streaming: true, tools: true, structuredOutput: "native", repoAccess: "local-tools", promptCaching: { system: EPHEMERAL, call: EPHEMERAL } },
+  capabilities: { streaming: true, tools: true, structuredOutput: "native", repoAccess: "local-tools", promptCaching: { system: EPHEMERAL, call: EPHEMERAL }, strictSchemas: ANTHROPIC_STRICT_LIMITS },
   defaultModel: () => DEFAULT_ANTHROPIC_MODEL,
   model(settings2, modelId, options = {}) {
     const anthropic = createAnthropic({ apiKey: need(self, settings2, "apiKey"), ...options.fetch && { fetch: options.fetch } });
@@ -7195,9 +7196,9 @@ var Brevo = class {
   /** A campaign's numbers and its clicks per link */
   async metrics(externalId) {
     if (externalId.includes(",")) {
-      const each = [];
-      for (const id of externalId.split(",")) each.push(await this.metrics(id));
-      return added(each);
+      const each2 = [];
+      for (const id of externalId.split(",")) each2.push(await this.metrics(id));
+      return added(each2);
     }
     const read = async (statistics) => {
       const path = `/emailCampaigns/${externalId}?statistics=${statistics}&excludeHtmlContent=true`;
@@ -7208,9 +7209,9 @@ var Brevo = class {
     return { ...statsOfCampaign(s), ...linkClicks(await read("linksStats")) };
   }
 };
-function added(each) {
+function added(each2) {
   const total = {};
-  for (const metrics2 of each) for (const [name2, value] of Object.entries(metrics2)) total[name2] = (total[name2] ?? 0) + value;
+  for (const metrics2 of each2) for (const [name2, value] of Object.entries(metrics2)) total[name2] = (total[name2] ?? 0) + value;
   return total;
 }
 function linkClicks(stats) {
@@ -10158,6 +10159,77 @@ function repoTools(root, options = {}) {
   };
 }
 
+// ../../packages/engine/src/ai/strict-schema.ts
+var STRICT_STRING_FORMATS = /* @__PURE__ */ new Set(["date-time", "time", "date", "duration", "email", "hostname", "uri", "ipv4", "ipv6", "uuid"]);
+var TOLD = ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf", "minLength", "maxLength", "pattern", "minItems", "maxItems", "uniqueItems", "minProperties", "maxProperties"];
+var isSchema = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isObjectSchema = (schema) => schema.type === "object" || Array.isArray(schema.type) && schema.type.includes("object") || isSchema(schema.properties);
+var each = (definitions) => isSchema(definitions) ? Object.fromEntries(Object.entries(definitions).map(([name2, definition]) => [name2, strictNode(definition)])) : void 0;
+function strictToolSchema(schema) {
+  return strictNode(schema);
+}
+function strictNode(node) {
+  if (!isSchema(node)) return structuredClone(node);
+  if (typeof node.$ref === "string") return { $ref: node.$ref };
+  const out = {};
+  if (node.title !== void 0) out.title = node.title;
+  if (node.description !== void 0) out.description = node.description;
+  if (node.default !== void 0) out.default = structuredClone(node.default);
+  if (node.const !== void 0) out.const = structuredClone(node.const);
+  if (node.enum !== void 0) out.enum = structuredClone(node.enum);
+  if (node.type !== void 0) out.type = structuredClone(node.type);
+  const anyOf = Array.isArray(node.anyOf) ? node.anyOf : Array.isArray(node.oneOf) ? node.oneOf : void 0;
+  if (anyOf) out.anyOf = anyOf.map(strictNode);
+  if (Array.isArray(node.allOf)) out.allOf = node.allOf.map(strictNode);
+  const defs = each(node.$defs);
+  if (defs) out.$defs = defs;
+  const definitions = each(node.definitions);
+  if (definitions) out.definitions = definitions;
+  if (isObjectSchema(node)) {
+    const properties = each(node.properties);
+    if (properties) out.properties = properties;
+    if (Array.isArray(node.required)) out.required = [...node.required];
+    out.additionalProperties = false;
+  }
+  if (node.items !== void 0) out.items = Array.isArray(node.items) ? node.items.map(strictNode) : strictNode(node.items);
+  if (typeof node.format === "string" && STRICT_STRING_FORMATS.has(node.format)) out.format = node.format;
+  if (node.minItems === 0 || node.minItems === 1) out.minItems = node.minItems;
+  const told = removedConstraints(node);
+  if (told) out.description = typeof out.description === "string" && out.description ? `${out.description}
+${told}` : told;
+  return out;
+}
+function removedConstraints(node) {
+  const said2 = TOLD.flatMap((key) => {
+    const value = node[key];
+    if (value === void 0 || value === false) return [];
+    if (key === "minItems" && (value === 0 || value === 1)) return [];
+    return [`${key.replace(/[A-Z]/g, (c) => ` ${c.toLowerCase()}`)}: ${typeof value === "string" ? value : JSON.stringify(value)}`];
+  });
+  if (typeof node.format === "string" && !STRICT_STRING_FORMATS.has(node.format)) said2.push(`format: ${node.format}`);
+  return said2.length > 0 ? `${said2.join("; ")}.` : void 0;
+}
+function strictSchemaComplexity(schema) {
+  const count7 = { optionalParams: 0, unionParams: 0 };
+  const walk = (node) => {
+    if (Array.isArray(node)) return node.forEach(walk);
+    if (!isSchema(node)) return;
+    if (Array.isArray(node.anyOf) || Array.isArray(node.oneOf) || Array.isArray(node.type)) count7.unionParams++;
+    if (isSchema(node.properties)) {
+      const required = new Set(Array.isArray(node.required) ? node.required : []);
+      count7.optionalParams += Object.keys(node.properties).filter((key) => !required.has(key)).length;
+    }
+    for (const key of ["properties", "$defs", "definitions"]) if (isSchema(node[key])) Object.values(node[key]).forEach(walk);
+    for (const key of ["items", "anyOf", "oneOf", "allOf", "additionalProperties"]) walk(node[key]);
+  };
+  walk(schema);
+  return count7;
+}
+function fitsStrictLimits(schema, limits15) {
+  const used = strictSchemaComplexity(schema);
+  return used.optionalParams <= limits15.optionalParams && used.unionParams <= limits15.unionParams;
+}
+
 // ../../packages/engine/src/ai/runner.ts
 var SUBMIT_TOOL = "submit_answer";
 var SUBMIT_INSTRUCTION = `When you have the answer, call the ${SUBMIT_TOOL} tool exactly once with the whole answer. Do not write the answer as text: only what ${SUBMIT_TOOL} receives is read.`;
@@ -10176,18 +10248,24 @@ var AiTaskRunner = class {
   /**
    * Runs a task with a structured answer and returns it validated. With client tools (the repo's, on
    * a `local-tools` provider) or a provider with no response format, the answer is the input of the
-   * submit tool, and the loop stops at that call or at the task's step ceiling; otherwise it is the
-   * response format's JSON. An invalid answer is sent back once with what is wrong.
+   * submit tool, and the loop stops at that call or at the task's step ceiling; so too when the
+   * answer's schema is past the provider's strict decoding limits. Otherwise it is the response
+   * format's JSON. The provider is sent the schema relaxed to what strict decoding takes; the answer
+   * is validated against the task's full zod schema, and an invalid one is sent back once with what is wrong.
    */
   async run(task2, input, setup) {
     const output = task2.output;
     if (!output) throw new Error(`${task2.id} answers with text: stream it`);
     const plan = await this.#plan(task2, input, setup);
     return this.#timed(plan, () => this.#prepared(plan, async (plan2) => {
-      const submit = Object.keys(plan2.tools).length > 0 || plan2.setup.provider.capabilities.structuredOutput === "none";
+      const limits15 = plan2.setup.provider.capabilities.strictSchemas;
+      const sent = strictToolSchema(output.jsonSchema());
+      const answer = { sent, strict: limits15 !== void 0 && fitsStrictLimits(sent, limits15) };
+      const tooComplex = limits15 !== void 0 && !answer.strict;
+      const submit = Object.keys(plan2.tools).length > 0 || plan2.setup.provider.capabilities.structuredOutput === "none" || tooComplex;
       let usage = NO_USAGE;
       let steps = 0;
-      const first = submit ? await this.#submitCall(plan2, plan2.messages, false) : await this.#nativeCall(plan2, plan2.messages);
+      const first = submit ? await this.#submitCall(plan2, answer, plan2.messages, false) : await this.#nativeCall(plan2, answer, plan2.messages);
       usage = add2(usage, first.usage);
       steps += first.steps;
       let last = first.providerMetadata;
@@ -10202,7 +10280,7 @@ var AiTaskRunner = class {
       const conversation = [...plan2.messages, ...first.responseMessages];
       if (first.submitted) conversation.push({ role: "tool", content: [{ type: "tool-result", toolCallId: first.submitted.toolCallId, toolName: SUBMIT_TOOL, output: { type: "error-text", value: why } }] });
       else conversation.push({ role: "user", content: why });
-      const second = submit ? await this.#submitCall(plan2, conversation, true) : await this.#nativeCall(plan2, conversation);
+      const second = submit ? await this.#submitCall(plan2, answer, conversation, true) : await this.#nativeCall(plan2, answer, conversation);
       usage = add2(usage, second.usage);
       steps += second.steps;
       last = second.providerMetadata ?? last;
@@ -10341,20 +10419,19 @@ var AiTaskRunner = class {
     }
   }
   /** The answer in the response format: no client tools, one step */
-  #nativeCall(plan, messages) {
+  #nativeCall(plan, answer, messages) {
     const output = plan.task.output;
     return this.#call(plan, messages, {
-      output: Output.object({ schema: jsonSchema(output.jsonSchema()), name: output.name }),
+      output: Output.object({ schema: jsonSchema(answer.sent), name: output.name }),
       stopWhen: stepCountIs(1)
     });
   }
   /** The answer as the submit tool's input, after as many tool rounds as the task allows; a repair may only submit */
-  #submitCall(plan, messages, repair) {
-    const output = plan.task.output;
+  #submitCall(plan, answer, messages, repair) {
     const submit = tool2({
       description: "Submit the final answer. Call it once, with the whole answer, when you are done; nothing after it is read.",
-      inputSchema: jsonSchema(output.jsonSchema()),
-      strict: true
+      inputSchema: jsonSchema(answer.sent),
+      strict: answer.strict
     });
     const tools10 = repair ? { [SUBMIT_TOOL]: submit } : { ...plan.tools, [SUBMIT_TOOL]: submit };
     return this.#call(plan, messages, {
