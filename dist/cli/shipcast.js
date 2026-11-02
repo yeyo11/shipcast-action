@@ -4782,12 +4782,10 @@ var DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5";
 var self = { id: "anthropic", name: "Anthropic API", settings: [{ key: "apiKey", label: "API key", secret: true }] };
 var EPHEMERAL = { anthropic: { cacheControl: { type: "ephemeral" } } };
 var ANTHROPIC_STRICT_LIMITS = { optionalParams: 24, unionParams: 16 };
-var DROP_STALE_THINKING = { anthropic: { thinking: { blockBinding: { prefixMismatchBehavior: "drop_block" } } } };
 var anthropicAiProvider = aiProvider({
   ...self,
   listed: true,
   capabilities: { streaming: true, tools: true, structuredOutput: "native", repoAccess: "local-tools", promptCaching: { system: EPHEMERAL, call: EPHEMERAL }, strictSchemas: ANTHROPIC_STRICT_LIMITS },
-  providerOptions: DROP_STALE_THINKING,
   defaultModel: () => DEFAULT_ANTHROPIC_MODEL,
   model(settings2, modelId, options = {}) {
     const anthropic = createAnthropic({ apiKey: need(self, settings2, "apiKey"), ...options.fetch && { fetch: options.fetch } });
