@@ -19376,10 +19376,20 @@ var RuntimeSettings = class {
   sources() {
     return this.#sources;
   }
-  /** The settings that are still unset, by label, for `shipcast status` and the pages */
-  missing() {
-    const required = ["launchesRepo", "claudioUrl", "claudioToken"];
+  /**
+   * The settings that are still unset, by label, for `shipcast status` and the pages. claudio's
+   * address and token are needed only while a task of the AI settings runs on claudio: with the
+   * Anthropic API or an OpenAI-compatible server chosen for every task, they are not missing
+   * (`missingNow` reads that choice).
+   */
+  missing(options = {}) {
+    const required = ["launchesRepo", ...options.claudio === false ? [] : ["claudioUrl", "claudioToken"]];
     return required.filter((n) => this.#current[n] === void 0);
+  }
+  /** `missing`, knowing from the AI settings whether any task runs on claudio */
+  async missingNow() {
+    const ai = await readAiSettings(this.#deps.registry);
+    return this.missing({ claudio: Object.values(ai.tasks).some((t) => t.provider === "claudio") });
   }
   launchesRepo() {
     const repo3 = this.#current.launchesRepo;
@@ -20085,7 +20095,7 @@ async function aiProviderSettings(id, deps) {
     return { url: claudio.url, token: claudio.token };
   }
   const found = await connectedAccount(id, deps);
-  if (!found) throw new AiError("ai_not_connected", `the ${aiProviderDefinition(id)?.name ?? id} is chosen in the AI settings but no account is connected: connect one on the Channels page`, { provider: id });
+  if (!found) throw new AiError("ai_not_connected", `the ${aiProviderDefinition(id)?.name ?? id} is chosen in the AI settings but no account is connected: connect it from Settings \u2192 AI, Providers`, { provider: id });
   if (found.settings.baseUrl) registerAiHost(found.settings.baseUrl, "openai-compatible");
   return { ...found.settings, ...found.secrets };
 }
@@ -21351,6 +21361,17 @@ function authenticatedCheckout(token, workspaceDir) {
 function ciPipeline(ai, base, launch2) {
   return { ...base, aiRunner: ciAiRunner(ai, launch2), aiTexts: () => currentAiTexts(base.registry) };
 }
+async function ciPublishLaunch(launch2, brand, deps) {
+  const services = await buildServices({
+    env: networkEnv(deps.env, brand.id, deps.workDir, (path2, content) => writeFileSync2(path2, content, { mode: 384 })),
+    brand,
+    registry: deps.registry,
+    github: deps.github,
+    secrets: new MemorySecrets(),
+    ...deps.adapters && { adapters: deps.adapters }
+  });
+  return publishOne(launch2, { env: deps.env, registry: deps.registry, github: deps.github, secrets: new MemorySecrets(), brand, pipeline: deps.pipeline, log: deps.log }, services);
+}
 async function buildCiDeps(config, env, options) {
   const auth = config.github.kind === "app" ? new GitHubApp({ appId: config.github.appId, ...config.github.clientId && { clientId: config.github.clientId }, privateKey: config.github.privateKey, account: () => config.launchesRepo }) : void 0;
   const staticToken = config.github.kind === "token" ? config.github.token : void 0;
@@ -21382,14 +21403,7 @@ async function buildCiDeps(config, env, options) {
       return draftLaunch(launch2, brandOf2, pipelineFor(registry, { launch: launch2, brand: brandOf2 }));
     },
     async publish(launch2, brandOf2, registry) {
-      const services = await buildServices({
-        env: networkEnv(env, brandOf2.id, config.workDir, (path2, content) => writeFileSync2(path2, content, { mode: 384 })),
-        brand: brandOf2,
-        registry,
-        github,
-        secrets: new MemorySecrets()
-      });
-      return publishOne(launch2, { env, registry, github, secrets: new MemorySecrets(), brand: brandOf2, pipeline: pipelineFor(registry), log: options.log }, services);
+      return ciPublishLaunch(launch2, brandOf2, { env, workDir: config.workDir, github, registry, pipeline: pipelineFor(registry), log: options.log });
     }
   };
 }
@@ -21463,7 +21477,8 @@ function bootstrapEnv(options) {
     `POSTGRES_PASSWORD=${options.postgresPassword}`,
     `SHIPCAST_DATABASE_URL=postgres://shipcast:${options.postgresPassword}@127.0.0.1:5433/shipcast`,
     "",
-    "# claudio, the AI provider of docker-compose.yml (optional: `docker compose up -d claudio`)",
+    "# claudio, if you choose it as the AI provider (or pick the Anthropic API or an OpenAI-compatible",
+    "# server in the onboarding and leave this): `docker compose --profile claudio up -d`",
     `SHIPCAST_CLAUDIO_TOKEN=${options.claudioToken}`,
     "",
     "# Who may sign in",
@@ -21643,6 +21658,8 @@ ${INIT_USAGE}`);
         "Done. Next:",
         "  pnpm app        start the app, then open it and finish in its onboarding",
         publicUrl ? `                  (${publicUrl}; set SHIPCAST_TLS_CLOUDFLARE_TOKEN in .env for its certificate)` : `                  (${LOCAL_URL}, signed in with the one-time link it prints)`,
+        "  The AI provider is chosen in the onboarding: the Anthropic API, an OpenAI-compatible server,",
+        "                  or claudio (docker compose --profile claudio up -d, then docs/claudio.md)",
         "  docs/install.md for what each step did and the GitHub Action mode"
       ].join("\n")
     );
@@ -21811,8 +21828,12 @@ ${names.map((n) => `          ${n}: \${{ secrets.${n} }}`).join("\n")}` : "";
   return `# Shipcast, in the launches repo (written by \`npx @yeyo11/shipcast init\`).
 #
 # When a drafts pull request (launch/*) is merged, Shipcast publishes that launch to every channel its
-# launch.yml turns on, once the article is live. Every hour it also publishes what is due (a scheduled
-# piece, a channel to retry). A channel without its secrets is not published to.
+# launch.yml turns on, once the article is live. It also runs a round (what is due: a scheduled piece,
+# a channel to retry) every time it is dispatched. A channel without its secrets is not published to.
+#
+# GitHub delays or drops \`schedule\` runs, so the three cron lines below are only a backstop: the round
+# is on time when something outside GitHub dispatches this workflow every 15 minutes (the exact curl is
+# in docs/action-timing.md and in what \`init\` printed). A late round only delays a post; it loses none.
 #
 # Secrets: SHIPCAST_GITHUB_TOKEN (this workflow's own token is the fallback), and each channel's.
 # Variables (optional): SHIPCAST_DRY_RUN=true lists what would be posted and posts nothing.
@@ -21822,7 +21843,11 @@ on:
   pull_request:
     types: [closed]
   schedule:
-    - cron: "17 * * * *"
+    # Minutes GitHub's scheduler is least busy at (not :00 or :30); the concurrency group below makes
+    # runs that overlap wait for each other
+    - cron: "7 * * * *"
+    - cron: "27 * * * *"
+    - cron: "47 * * * *"
   workflow_dispatch:
     inputs:
       dry-run:
@@ -21851,8 +21876,40 @@ jobs:
           command: \${{ github.event_name == 'pull_request' && 'publish' || 'round' }}
           launches-repo: \${{ github.repository }}
           github-token: \${{ secrets.SHIPCAST_GITHUB_TOKEN || github.token }}
+          # How long a merge waits for the blog to deploy before leaving it to the next round
+          wait-minutes: 25
           dry-run: \${{ inputs.dry-run == true || vars.SHIPCAST_DRY_RUN == 'true' }}${env}
 `;
+}
+function roundTriggerCurl(launchesRepo) {
+  return [
+    "curl -fsS -X POST \\",
+    '  -H "Authorization: Bearer $SHIPCAST_DISPATCH_TOKEN" \\',
+    '  -H "Accept: application/vnd.github+json" \\',
+    `  https://api.github.com/repos/${launchesRepo}/actions/workflows/shipcast-publish.yml/dispatches \\`,
+    `  -d '{"ref":"main"}'`
+  ].join("\n");
+}
+function timingReport(options) {
+  return [
+    "Timing. GitHub delays or drops scheduled workflows, so the hourly round in shipcast-publish.yml is a backstop.",
+    "For a round every 15 minutes, call the workflow from outside GitHub (a Cloudflare Worker with a Cron Trigger,",
+    "cron-job.org, your own server). Make a fine-grained token for",
+    `${options.launchesRepo} only, with Actions read and write, keep it as SHIPCAST_DISPATCH_TOKEN there, and run:`,
+    "",
+    roundTriggerCurl(options.launchesRepo).split("\n").map((l) => `  ${l}`).join("\n"),
+    "",
+    "A late round only delays a scheduled post or a retry; it loses none. Without it, those wait for the next backstop run.",
+    "",
+    'A release made by another workflow with GITHUB_TOKEN does not start "Shipcast launch" (GitHub does not chain',
+    "workflows from that token). Add this as the last step of that release workflow, with 'permissions: actions: write':",
+    "",
+    '  - run: gh workflow run shipcast.yml -f tag="$TAG"',
+    "    env:",
+    "      GH_TOKEN: ${{ github.token }}",
+    "",
+    "(dispatching a workflow is the one thing GITHUB_TOKEN may do; a release made by hand or with a PAT needs nothing.)"
+  ].join("\n");
 }
 var TOKEN_HOW = "a fine-grained token at https://github.com/settings/personal-access-tokens/new: only this project and the launches repo; Contents, Pull requests and Discussions read and write";
 function secretsToSet(options) {
@@ -22030,6 +22087,8 @@ ${existing3.map((f) => `  ${relative2(cwd, f.path) || f.path}`).join("\n")}`);
       log(toneWarning(options.launchesRepo));
       log("");
     }
+    log(timingReport(options));
+    log("");
     log('Then publish a release (or run "Shipcast launch" by hand with a tag): the drafts pull request arrives in');
     log(`${options.launchesRepo}; merge it to publish. To try it first, set the variable SHIPCAST_DRY_RUN=true in both repos.`);
     log("Guide: https://github.com/yeyo11/shipcast/blob/main/docs/getting-started.md");
@@ -24489,7 +24548,7 @@ GitHub: the App${access2.slug ? ` ${access2.slug}` : ""}, ${installation}; commi
         } else {
           console.log("\nGitHub: GITHUB_TOKEN_PERSONAL (no GitHub App in .env)");
         }
-        const missing = settings2.missing();
+        const missing = await settings2.missingNow();
         if (missing.length > 0) {
           console.log(`Settings still to set in the app's Settings page: ${missing.map((n) => settingDefinition(n).label).join(", ")}`);
           return 0;
