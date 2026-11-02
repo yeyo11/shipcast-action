@@ -4782,10 +4782,12 @@ var DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5";
 var self = { id: "anthropic", name: "Anthropic API", settings: [{ key: "apiKey", label: "API key", secret: true }] };
 var EPHEMERAL = { anthropic: { cacheControl: { type: "ephemeral" } } };
 var ANTHROPIC_STRICT_LIMITS = { optionalParams: 24, unionParams: 16 };
+var DROP_STALE_THINKING = { anthropic: { thinking: { blockBinding: { prefixMismatchBehavior: "drop_block" } } } };
 var anthropicAiProvider = aiProvider({
   ...self,
   listed: true,
   capabilities: { streaming: true, tools: true, structuredOutput: "native", repoAccess: "local-tools", promptCaching: { system: EPHEMERAL, call: EPHEMERAL }, strictSchemas: ANTHROPIC_STRICT_LIMITS },
+  providerOptions: DROP_STALE_THINKING,
   defaultModel: () => DEFAULT_ANTHROPIC_MODEL,
   model(settings2, modelId, options = {}) {
     const anthropic = createAnthropic({ apiKey: need(self, settings2, "apiKey"), ...options.fetch && { fetch: options.fetch } });
@@ -10426,19 +10428,25 @@ var AiTaskRunner = class {
       stopWhen: stepCountIs(1)
     });
   }
-  /** The answer as the submit tool's input, after as many tool rounds as the task allows; a repair may only submit */
+  /**
+   * The answer as the submit tool's input, after as many tool rounds as the task allows. A repair may
+   * only submit, but it is offered the very same tools: a current Claude model's thinking is bound to
+   * the tools and the history it was made with, and a later call whose tool list differs is refused
+   * with a 400. So the repo's tools stay declared, byte for byte, and only refuse to run: a model that
+   * calls one in a repair is told, in that call's result, to submit, and gets one step more to do it.
+   */
   #submitCall(plan, answer, messages, repair) {
     const submit = tool2({
       description: "Submit the final answer. Call it once, with the whole answer, when you are done; nothing after it is read.",
       inputSchema: jsonSchema(answer.sent),
       strict: answer.strict
     });
-    const tools10 = repair ? { [SUBMIT_TOOL]: submit } : { ...plan.tools, [SUBMIT_TOOL]: submit };
+    const tools10 = { ...repair ? refusing(plan.tools) : plan.tools, [SUBMIT_TOOL]: submit };
     return this.#call(plan, messages, {
       tools: tools10,
       toolChoice: "auto",
       instruction: SUBMIT_INSTRUCTION,
-      stopWhen: repair ? stepCountIs(1) : [hasToolCall(SUBMIT_TOOL), stepCountIs(plan.limits.maxSteps)]
+      stopWhen: [hasToolCall(SUBMIT_TOOL), stepCountIs(repair ? REPAIR_STEPS : plan.limits.maxSteps)]
     });
   }
   /**
@@ -10479,10 +10487,15 @@ var AiTaskRunner = class {
     }
     if (plan.signal.aborted) throw plan.signal.reason ?? new Error("aborted");
     if (failure2) throw failure2.error;
-    const [steps, usage, response, providerMetadata] = await Promise.all([result.steps, result.totalUsage, result.response, result.providerMetadata]);
-    return { text: text3, steps: steps.length, usage, responseMessages: response.messages, providerMetadata, ...submitted && { submitted } };
+    const [steps, usage, responseMessages, providerMetadata] = await Promise.all([result.steps, result.totalUsage, result.responseMessages, result.providerMetadata]);
+    return { text: text3, steps: steps.length, usage, responseMessages, providerMetadata, ...submitted && { submitted } };
   }
 };
+var REPAIR_STEPS = 2;
+function refusing(tools10) {
+  const refusal = `Only ${SUBMIT_TOOL} may be called now. Call it with the whole answer.`;
+  return Object.fromEntries(Object.entries(tools10).map(([name2, t]) => [name2, { ...t, execute: async () => refusal }]));
+}
 function budgetOf(taskId, budgets) {
   return AI_BUDGET_TASKS.includes(taskId) ? budgets?.[taskId] : void 0;
 }
