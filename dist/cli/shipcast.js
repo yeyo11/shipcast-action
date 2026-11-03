@@ -5368,10 +5368,11 @@ var DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5";
 var self = { id: "anthropic", name: "Anthropic API", settings: [{ key: "apiKey", label: "API key", secret: true }] };
 var EPHEMERAL = { anthropic: { cacheControl: { type: "ephemeral" } } };
 var ANTHROPIC_STRICT_LIMITS = { optionalParams: 24, unionParams: 16 };
+var SUBMIT_TOOL_OPTIONS = { anthropic: { eagerInputStreaming: false } };
 var anthropicAiProvider = aiProvider({
   ...self,
   listed: true,
-  capabilities: { streaming: true, tools: true, structuredOutput: "native", repoAccess: "local-tools", promptCaching: { system: EPHEMERAL, call: EPHEMERAL }, strictSchemas: ANTHROPIC_STRICT_LIMITS },
+  capabilities: { streaming: true, tools: true, structuredOutput: "native", repoAccess: "local-tools", promptCaching: { system: EPHEMERAL, call: EPHEMERAL }, strictSchemas: ANTHROPIC_STRICT_LIMITS, submitToolOptions: SUBMIT_TOOL_OPTIONS },
   defaultModel: () => DEFAULT_ANTHROPIC_MODEL,
   model(settings2, modelId, options = {}) {
     const anthropic = createAnthropic({ apiKey: need(self, settings2, "apiKey"), ...options.fetch && { fetch: options.fetch } });
@@ -10602,18 +10603,18 @@ var AiTaskRunner = class {
       if (submit && !first.submitted && first.steps >= plan2.limits.maxSteps) {
         throw new AiError("ai_no_answer", `the ${plan2.setup.provider.name} used all ${plan2.limits.maxSteps} steps of ${task2.id} without answering`, { provider: plan2.setup.provider.id, ...withChat(chat()) });
       }
-      const checked2 = check(output.schema, submit ? first.submitted?.input : parseJson(first.text));
+      const checked2 = checkAnswer(output.schema, first, submit, plan2.limits.maxOutputTokens);
       const done = (value, repaired) => ({ output: value, usage, steps, repaired, provider: plan2.setup.provider.id, model: plan2.modelId, ...last && { providerMetadata: last } });
       if (checked2.ok) return done(checked2.value, false);
       const why = first.submitted || !submit ? `That answer is not valid: ${checked2.problems}. Answer again, the whole answer, following the schema.` : `You ended without calling ${SUBMIT_TOOL}. Call it now with the whole answer.`;
       const conversation = [...plan2.messages, ...first.responseMessages];
-      if (first.submitted) conversation.push({ role: "tool", content: [{ type: "tool-result", toolCallId: first.submitted.toolCallId, toolName: SUBMIT_TOOL, output: { type: "error-text", value: why } }] });
+      if (first.submitted && !first.submitted.unparsed) conversation.push({ role: "tool", content: [{ type: "tool-result", toolCallId: first.submitted.toolCallId, toolName: SUBMIT_TOOL, output: { type: "error-text", value: why } }] });
       else conversation.push({ role: "user", content: why });
       const second = submit ? await this.#submitCall(plan2, answer, conversation, true) : await this.#nativeCall(plan2, answer, conversation);
       usage = add2(usage, second.usage);
       steps += second.steps;
       last = second.providerMetadata ?? last;
-      const again = check(output.schema, submit ? second.submitted?.input : parseJson(second.text));
+      const again = checkAnswer(output.schema, second, submit, plan2.limits.maxOutputTokens);
       if (again.ok) return done(again.value, true);
       throw new AiError("ai_invalid_output", `the ${plan2.setup.provider.name}'s answer to ${task2.id} is not valid, even after a repair: ${again.problems}`.slice(0, 2e3), { provider: plan2.setup.provider.id, ...withChat(chat()) });
     }));
@@ -10766,7 +10767,8 @@ var AiTaskRunner = class {
     const submit = tool2({
       description: "Submit the final answer. Call it once, with the whole answer, when you are done; nothing after it is read.",
       inputSchema: jsonSchema(answer.sent),
-      strict: answer.strict
+      strict: answer.strict,
+      ...plan.setup.provider.capabilities.submitToolOptions && { providerOptions: plan.setup.provider.capabilities.submitToolOptions }
     });
     const tools15 = { ...repair ? refusing(plan.tools) : plan.tools, [SUBMIT_TOOL]: submit };
     return this.#call(plan, messages, {
@@ -10809,13 +10811,16 @@ var AiTaskRunner = class {
         onText?.(part.text);
       } else if (part.type === "tool-call") {
         plan.observer?.toolCall?.({ name: part.toolName, input: part.input });
-        if (part.toolName === SUBMIT_TOOL) submitted = { toolCallId: part.toolCallId, input: part.input };
+        if (part.toolName === SUBMIT_TOOL) {
+          submitted = { toolCallId: part.toolCallId, input: part.input };
+          if ("invalid" in part && part.invalid) submitted.unparsed = part.error instanceof Error ? part.error.message : String(part.error);
+        }
       } else if (part.type === "finish-step") plan.observer?.step?.(part.usage);
     }
     if (plan.signal.aborted) throw plan.signal.reason ?? new Error("aborted");
     if (failure2) throw failure2.error;
-    const [steps, usage, responseMessages, providerMetadata] = await Promise.all([result.steps, result.totalUsage, result.responseMessages, result.providerMetadata]);
-    return { text: text3, steps: steps.length, usage, responseMessages, providerMetadata, ...submitted && { submitted } };
+    const [steps, usage, responseMessages, providerMetadata, finishReason] = await Promise.all([result.steps, result.totalUsage, result.responseMessages, result.providerMetadata, result.finishReason]);
+    return { text: text3, steps: steps.length, usage, responseMessages, providerMetadata, finishReason, ...submitted && { submitted } };
   }
 };
 var REPAIR_STEPS = 2;
@@ -10853,6 +10858,24 @@ function parseJson(text3) {
   } catch {
     return void 0;
   }
+}
+function unwrapStringified(value) {
+  if (typeof value !== "string") return value;
+  try {
+    const parsed = JSON.parse(value);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : value;
+  } catch {
+    return value;
+  }
+}
+function checkAnswer(schema, called, submit, maxOutputTokens) {
+  const cutOff = called.finishReason === "length";
+  if (submit && called.submitted?.unparsed) {
+    const problems = cutOff ? `the ${SUBMIT_TOOL} input was cut off at the output token limit (${maxOutputTokens}), so it is not complete JSON` : `the ${SUBMIT_TOOL} input is not valid JSON`;
+    return { ok: false, problems };
+  }
+  const checked2 = check(schema, unwrapStringified(submit ? called.submitted?.input : parseJson(called.text)));
+  return !checked2.ok && cutOff ? { ok: false, problems: `${checked2.problems} (the answer was cut off at the output token limit, ${maxOutputTokens})` } : checked2;
 }
 function check(schema, value) {
   if (value === void 0) return { ok: false, problems: "no JSON answer" };
