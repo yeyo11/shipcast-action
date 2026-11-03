@@ -692,9 +692,83 @@ import { and as and2, asc, count, desc, eq as eq2, ilike, inArray as inArray2, i
 // ../../packages/schema/src/channels.ts
 import { z } from "zod";
 
+// ../../packages/schema/src/languages.ts
+var LANGUAGE_PATTERN = /^[a-z]{2}$/;
+var isLanguage = (value) => typeof value === "string" && LANGUAGE_PATTERN.test(value);
+var LANGUAGE_NAMES = {
+  ar: "Arabic",
+  ca: "Catalan",
+  cs: "Czech",
+  da: "Danish",
+  de: "German",
+  el: "Greek",
+  en: "English",
+  es: "Spanish",
+  eu: "Basque",
+  fi: "Finnish",
+  fr: "French",
+  gl: "Galician",
+  he: "Hebrew",
+  hi: "Hindi",
+  hu: "Hungarian",
+  id: "Indonesian",
+  it: "Italian",
+  ja: "Japanese",
+  ko: "Korean",
+  nb: "Norwegian Bokm\xE5l",
+  nl: "Dutch",
+  no: "Norwegian",
+  pl: "Polish",
+  pt: "Portuguese",
+  ro: "Romanian",
+  ru: "Russian",
+  sv: "Swedish",
+  th: "Thai",
+  tr: "Turkish",
+  uk: "Ukrainian",
+  vi: "Vietnamese",
+  zh: "Chinese"
+};
+function languageName(lang) {
+  return LANGUAGE_NAMES[lang] ?? lang;
+}
+function newsletterLanguages(brand) {
+  if (!brand.newsletter) return [...brand.languages.blog];
+  const listed = Object.keys(brand.newsletter.lists);
+  return [...brand.languages.blog.filter((l) => listed.includes(l)), ...listed.filter((l) => !brand.languages.blog.includes(l))];
+}
+function packLanguages(brand) {
+  return { blog: [...brand.languages.blog], newsletter: newsletterLanguages(brand) };
+}
+function languagesOf(piece15) {
+  return piece15 ? Object.entries(piece15).filter(([key, value]) => /^[a-z]{2}$/.test(key) && value !== void 0).map(([key]) => key) : [];
+}
+function leadLanguage(article, brand) {
+  const present = languagesOf(article);
+  if (present.includes("en")) return "en";
+  return brand?.languages.blog.find((l) => present.includes(l)) ?? present[0];
+}
+function imageLanguage(article, brand) {
+  return brand.languages.blog.includes("en") ? "en" : leadLanguage(article, brand);
+}
+function imageVersion(piece15, brand) {
+  const lang = imageLanguage(piece15, brand);
+  return lang ? piece15?.[lang] : void 0;
+}
+
 // ../../packages/schema/src/channels/definition.ts
 var STATS_METRICS = ["views", "reactions", "comments", "shares", "clicks", "impressions"];
 var DETAIL_METRICS = ["saves", "reach", "interactions", "follows", "profileVisits", "navigation", "watchMinutes", "engagedViews", "visits", "clones", "unsubscribes"];
+function byLanguage({ z: z31 }, shape, version, languages, empty) {
+  const own = new Set(Object.keys(shape));
+  const versions = (piece15) => Object.keys(piece15).filter((key) => !own.has(key) && piece15[key] !== void 0);
+  const schema = languages ? z31.strictObject({ ...shape, ...Object.fromEntries(languages.map((lang) => [lang, version.optional()])) }) : z31.strictObject(shape).catchall(version).superRefine((piece15, ctx) => {
+    for (const key of versions(piece15)) {
+      if (!/^[a-z]{2}$/.test(key)) ctx.addIssue({ code: "custom", path: [key], message: `${key} is not a language: an ISO 639-1 code is two lowercase letters` });
+    }
+  });
+  return schema.refine((piece15) => versions(piece15).length > 0, empty);
+}
 var HOURLY_BATCHED = { hours: 1, read: "batched", why: "changes within the hour" };
 var WORKDAYS = [0, 1, 2, 3, 4];
 var MIDWEEK = [1, 2, 3];
@@ -888,7 +962,8 @@ function imageAltProblem(markdown, max4) {
 
 // ../../packages/schema/src/channels/blog.ts
 var limits = { articleDescription: 200, imageAlt: 140 };
-function piece({ z: z31 }) {
+function piece(kit) {
+  const { z: z31 } = kit;
   const slug3 = z31.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "a slug is lowercase words joined by hyphens");
   const version = z31.strictObject({
     slug: slug3.describe("The article's path in this language, in this language's words: claudio-claude-code-as-a-service, claudio-claude-code-como-servicio"),
@@ -899,11 +974,7 @@ function piece({ z: z31 }) {
     ),
     imageAlt: z31.string().min(1).max(limits.imageAlt).optional().describe("The launch image's alternative text in this language: what the image shows (the project's name, what it does), for people who cannot see it and for search")
   });
-  return z31.strictObject({
-    tags: z31.array(z31.string().min(1)).max(8).default([]),
-    en: version.optional(),
-    es: version.optional()
-  }).refine((a) => a.en || a.es, "the article needs at least one language").optional().describe("The blog article, the launch's canonical page; one version per language the brand's blog uses");
+  return byLanguage(kit, { tags: z31.array(z31.string().min(1)).max(8).default([]) }, version, kit.languages?.blog, "the article needs at least one language").optional().describe("The blog article, the launch's canonical page; one version per language the brand's blog uses");
 }
 var blog = {
   id: "blog",
@@ -1474,15 +1545,16 @@ var mastodon = {
 
 // ../../packages/schema/src/channels/newsletter.ts
 var limits10 = { newsletterSubject: 90, newsletterPreview: 140 };
-function piece10({ z: z31 }) {
+function piece10(kit) {
+  const { z: z31 } = kit;
   const issue = z31.strictObject({
     subject: z31.string().min(1).max(limits10.newsletterSubject),
     previewText: z31.string().min(1).max(limits10.newsletterPreview).describe("The preheader inbox apps show after the subject"),
     markdown: z31.string().min(1).describe("The email body in Markdown: a short, personal note on what shipped and why it matters, linking the article; not the article itself")
   });
-  return z31.strictObject({ en: issue.optional(), es: issue.optional() }).refine((n) => n.en || n.es, "the issue needs at least one language").optional().describe("The newsletter issue, one per language the brand's newsletter has a list for");
+  return byLanguage(kit, {}, issue, kit.languages?.newsletter, "the issue needs at least one language").optional().describe("The newsletter issue, one per language the brand's newsletter has a list for");
 }
-var DRAFT = /^newsletter-(en|es)\.md$/;
+var DRAFT = /^newsletter-([a-z]{2})\.md$/;
 var newsletter = {
   id: "newsletter",
   name: "Newsletter",
@@ -2014,7 +2086,7 @@ function lastMetricsRead(channel2, kind, publishedAt) {
 // ../../packages/schema/src/channels.ts
 var Channel = z.enum(CHANNELS);
 var PublishMode = z.enum(["auto", "approval", "off"]);
-var Language = z.enum(["en", "es"]);
+var Language = z.string().regex(LANGUAGE_PATTERN, "a language is an ISO 639-1 code: two lowercase letters, such as en");
 
 // ../../packages/schema/src/channels/cadence.ts
 var SITE_CADENCES = {
@@ -2222,7 +2294,8 @@ var Brand = z4.strictObject({
   /** A channel without a handle cannot publish */
   handles: z4.strictObject(handlesShape).prefault({}),
   languages: z4.strictObject({
-    blog: z4.array(Language).min(1).default(["en", "es"]),
+    // ISO 639-1 codes, in order: the first is the primary language. English alone when unset
+    blog: z4.array(Language).min(1).refine((l) => new Set(l).size === l.length, "a language is listed once").default(["en"]),
     // The language of the LinkedIn post and of the article its card shares; English when unset
     linkedin: Language.optional()
   }).prefault({}),
@@ -2262,7 +2335,8 @@ function pieceLimitProblem(channel2, text3) {
   return length > limit2.max ? `${limit2.network} takes at most ${limit2.max} characters (${limit2.counting}); this is ${length}` : void 0;
 }
 var KIT = { z: z5, Language };
-var pieces = Object.fromEntries(CHANNEL_DEFINITIONS.map((d) => [d.pack.key, d.pack.piece(KIT)]));
+var piecesFor = (kit) => Object.fromEntries(CHANNEL_DEFINITIONS.map((d) => [d.pack.key, d.pack.piece(kit)]));
+var pieces = piecesFor(KIT);
 var Analysis = z5.strictObject({
   summary: z5.string().min(1).describe("What the project is and who it is for, in two or three sentences"),
   implemented: z5.array(z5.string().min(1)).min(1).describe("Features that exist in the code today, each one checked against the source"),
@@ -2285,12 +2359,12 @@ var KeptAnalysis = Analysis.extend({ implemented: z5.array(z5.string().min(1)), 
 });
 var projectName = z5.string().min(1);
 var projectVersion = z5.string().optional().describe("The release tag that triggered the launch, if any");
-var packOf = (project, analysis = Analysis) => z5.strictObject({
+var packOf = (project, analysis = Analysis, packPieces = pieces) => z5.strictObject({
   schemaVersion: z5.literal(1),
   kind: PackKind,
   project,
   analysis,
-  ...pieces,
+  ...packPieces,
   releaseNotes: z5.string().optional().describe("Improved release notes in Markdown, for the minor pack")
 }).describe("Everything one launch publishes, written from the code of the project");
 var AppProject = z5.strictObject({
@@ -2300,8 +2374,26 @@ var AppProject = z5.strictObject({
   version: projectVersion
 });
 var ContentPack = packOf(AppProject, KeptAnalysis);
-var AiContentPack = packOf(z5.strictObject({ name: projectName, repo: z5.url(), version: projectVersion }));
-var AiSourcesPack = packOf(AppProject, SourcesAnalysis);
+var DEFAULT_PACK_LANGUAGES = { blog: ["en", "es"], newsletter: ["en", "es"] };
+var languagesKey = (languages) => `${languages.blog.join(",")}|${languages.newsletter.join(",")}`;
+var releaseProject = z5.strictObject({ name: projectName, repo: z5.url(), version: projectVersion });
+var aiPacks = /* @__PURE__ */ new Map();
+var aiRelease = (packPieces) => packOf(releaseProject, Analysis, packPieces);
+var aiSources = (packPieces) => packOf(AppProject, SourcesAnalysis, packPieces);
+function aiPacksFor(languages) {
+  const key = languagesKey(languages);
+  let made = aiPacks.get(key);
+  if (!made) {
+    const packPieces = piecesFor({ ...KIT, languages });
+    made = { release: aiRelease(packPieces), sources: aiSources(packPieces) };
+    aiPacks.set(key, made);
+  }
+  return made;
+}
+var aiContentPack = (languages = DEFAULT_PACK_LANGUAGES) => aiPacksFor(languages).release;
+var AiContentPack = aiContentPack();
+var aiSourcesPack = (languages = DEFAULT_PACK_LANGUAGES) => aiPacksFor(languages).sources;
+var AiSourcesPack = aiSourcesPack();
 function contentPackFor(definitions) {
   const known = new Set(CHANNEL_DEFINITIONS.map((d) => d.pack.key));
   const extra = definitions.filter((d) => !known.has(d.pack.key));
@@ -2313,7 +2405,7 @@ function articleUrl(pack2, site, lang) {
 }
 function articleLink(pack2, site, ...langs) {
   for (const lang of langs) {
-    const url = articleUrl(pack2, site, lang);
+    const url = lang && articleUrl(pack2, site, lang);
     if (url) return url;
   }
   return site;
@@ -2329,11 +2421,13 @@ function missingPieces(pack2, config, brand) {
       if (!pack2.article[lang]) missing.push(`blog: the article has no ${lang} version`);
     }
   }
-  if (config.publishing.devto !== "off" && !pack2.article?.en) {
-    missing.push("devto: dev.to republishes the English article, which is missing");
+  const republished2 = brand.languages.blog.includes("en") ? "en" : brand.languages.blog[0];
+  const republishedName = republished2 && languageName(republished2);
+  if (config.publishing.devto !== "off" && republished2 && !pack2.article?.[republished2]) {
+    missing.push(`devto: dev.to republishes the ${republishedName} article, which is missing`);
   }
-  if (config.publishing.hashnode !== "off" && !pack2.article?.en) {
-    missing.push("hashnode: Hashnode republishes the English article, which is missing");
+  if (config.publishing.hashnode !== "off" && republished2 && !pack2.article?.[republished2]) {
+    missing.push(`hashnode: Hashnode republishes the ${republishedName} article, which is missing`);
   }
   if (config.publishing.linkedin !== "off" && pack2.linkedin && !pack2.article) {
     missing.push("linkedin: LinkedIn shares the article, which is missing");
@@ -2347,18 +2441,18 @@ function missingPieces(pack2, config, brand) {
   if (config.publishing.newsletter !== "off") {
     if (!brand.newsletter) missing.push("newsletter: brand.yml has no newsletter");
     else if (pack2.newsletter) {
-      for (const lang of Object.keys(brand.newsletter.lists)) {
+      for (const lang of newsletterLanguages(brand)) {
         if (!pack2.newsletter[lang]) missing.push(`newsletter: the issue has no ${lang} version`);
       }
     }
   }
   return missing;
 }
-function contentPackJsonSchema() {
-  return z5.toJSONSchema(AiContentPack, { target: "draft-7", io: "input" });
+function contentPackJsonSchema(languages = DEFAULT_PACK_LANGUAGES) {
+  return z5.toJSONSchema(aiContentPack(languages), { target: "draft-7", io: "input" });
 }
-function sourcesPackJsonSchema() {
-  return z5.toJSONSchema(AiSourcesPack, { target: "draft-7", io: "input" });
+function sourcesPackJsonSchema(languages = DEFAULT_PACK_LANGUAGES) {
+  return z5.toJSONSchema(aiSourcesPack(languages), { target: "draft-7", io: "input" });
 }
 
 // ../../packages/schema/src/pack.ts
@@ -2448,12 +2542,6 @@ function parseFrontMatter(markdown) {
 function pullRequestNumber(launch2) {
   const number2 = Number(/\/pull\/(\d+)/.exec(launch2.detail ?? "")?.[1]);
   return number2 || void 0;
-}
-
-// ../../packages/schema/src/languages.ts
-var LANGUAGE_NAMES = { en: "English", es: "Spanish" };
-function languageName(lang) {
-  return LANGUAGE_NAMES[lang] ?? lang;
 }
 
 // ../../packages/schema/src/errors.ts
@@ -2820,6 +2908,13 @@ var SOURCES_PACK_TASK = task({
   needsRepo: "always",
   limits: AI_TASK_DEFINITIONS.pack.limits
 });
+function packTaskFor(task2, languages) {
+  const sources = task2.output?.schema === AiSourcesPack;
+  if (!task2.output || !sources && task2.output.schema !== AiContentPack) return task2;
+  const schema = sources ? aiSourcesPack(languages) : aiContentPack(languages);
+  const jsonSchema2 = () => sources ? sourcesPackJsonSchema(languages) : contentPackJsonSchema(languages);
+  return { ...task2, output: { ...task2.output, schema, jsonSchema: jsonSchema2 } };
+}
 
 // ../../packages/engine/src/launch-keys.ts
 import { stringify } from "yaml";
@@ -4055,8 +4150,8 @@ var MetricRepository = class {
 // ../../packages/engine/src/repositories/posts.ts
 import { and as and11, asc as asc7, count as count5, eq as eq14, gte as gte3, inArray as inArray9, like, max as max3, notInArray as notInArray3, or as or6, sql as sql11 } from "drizzle-orm";
 function kindLanguage(kind) {
-  const lang = /^(?:article|issue):(en|es)$/.exec(kind)?.[1];
-  return lang === "en" || lang === "es" ? lang : void 0;
+  const lang = /^(?:article|issue):([a-z]{2})$/.exec(kind)?.[1];
+  return isLanguage(lang) ? lang : void 0;
 }
 function toPost(row) {
   return {
@@ -4767,14 +4862,19 @@ var GitHubApp = class {
 
 // ../../packages/engine/src/newsletter.ts
 import { Marked } from "marked";
+var ENGLISH = { read: "Read the article", why: "You get this because you subscribed at", unsubscribe: "Unsubscribe" };
 var COPY = {
-  en: { read: "Read the article", why: "You get this because you subscribed at", unsubscribe: "Unsubscribe" },
-  es: { read: "Leer el art\xEDculo", why: "Te llega porque te suscribiste en", unsubscribe: "Darte de baja" }
+  en: ENGLISH,
+  es: { read: "Leer el art\xEDculo", why: "Te llega porque te suscribiste en", unsubscribe: "Darte de baja" },
+  fr: { read: "Lire l\u2019article", why: "Vous recevez ce message car vous vous \xEAtes abonn\xE9 sur", unsubscribe: "Se d\xE9sabonner" },
+  de: { read: "Artikel lesen", why: "Sie erhalten dies, weil Sie sich angemeldet haben auf", unsubscribe: "Abmelden" },
+  it: { read: "Leggi l\u2019articolo", why: "Ricevi questa email perch\xE9 ti sei iscritto su", unsubscribe: "Annulla l\u2019iscrizione" },
+  pt: { read: "Ler o artigo", why: "Recebe isto porque se inscreveu em", unsubscribe: "Cancelar a inscri\xE7\xE3o" }
 };
 var esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 function renderIssueHtml(issue, options) {
   const { brand, lang } = options;
-  const copy = COPY[lang];
+  const copy = COPY[lang] ?? ENGLISH;
   const colour = options.look.colour;
   const marked = new Marked({ gfm: true, breaks: false });
   const body = marked.parse(issue.markdown, { async: false }).replace(/<p>/g, `<p style="margin:0 0 18px;font:18px/1.6 Georgia,'Times New Roman',serif;color:#22211f">`).replace(/<a /g, '<a style="color:#000;text-decoration:underline" ').replace(/<(ul|ol)>/g, '<$1 style="margin:0 0 18px;padding-left:22px;font:18px/1.6 Georgia,serif;color:#22211f">').replace(/<code>/g, '<code style="font:15px Menlo,Consolas,monospace;background:#f2f1ed;padding:1px 4px">');
@@ -4799,9 +4899,17 @@ ${image2}
 // ../../packages/engine/src/drafts.ts
 var q = (value) => JSON.stringify(value);
 function instagramComment(pack2, brand) {
-  const url = articleLink(pack2, brand.site, "en", "es").replace(/^https:\/\//, "");
+  const url = articleLink(pack2, brand.site, leadLanguage(pack2.article, brand)).replace(/^https:\/\//, "");
   return `Full write-up: ${url} (link in bio). What would you use it for?`;
 }
+var coverTitle = (pack2, brand) => {
+  const lang = imageLanguage(pack2.article, brand);
+  return lang && pack2.article?.[lang]?.title;
+};
+var republished = (pack2, brand) => {
+  const lead = leadLanguage(pack2.article, brand);
+  return !lead || lead === "en" ? "English" : languageName(lead);
+};
 var redditDraftFile = (subreddit) => draftFile("reddit", subreddit).name;
 function projectSlug(repo3) {
   return repo3.split("/").at(-1).toLowerCase();
@@ -4841,11 +4949,16 @@ function asPublishedDirectly(files) {
     (f) => "content" in f && f.path.endsWith(".md") && pending.test(f.content) ? { ...f, content: f.content.replace(pending, "> **Published directly:** sent out without a pull request; edit it on the channel itself.") } : f
   );
 }
+var ARTICLE_PATH = /^src\/content\/posts\/([a-z]{2})\/[^/]+\.md$/;
+function translationKeyOf(pack2, brand) {
+  const lead = leadLanguage(pack2.article, brand);
+  return (lead && pack2.article?.[lead]?.slug) ?? "";
+}
 async function keepPubDates(files, github, launchesRepo, date) {
   const today = date.toISOString().slice(0, 10);
   return Promise.all(
     files.map(async (file) => {
-      if (!("content" in file) || !/^src\/content\/posts\/(en|es)\/[^/]+\.md$/.test(file.path)) return file;
+      if (!("content" in file) || !ARTICLE_PATH.test(file.path)) return file;
       const existing3 = await github.fileAt(launchesRepo, file.path, "HEAD");
       const first = existing3 && /^pubDate: (\S+)$/m.exec(existing3)?.[1];
       if (!first || first === today) return file;
@@ -4859,9 +4972,9 @@ function renderDrafts(pack2, launch2, config, brand, date, image2, screenshots =
   const files = [];
   const dir = launchDir(launch2);
   const mode = (c) => config.publishing[c];
-  const translationKey = pack2.article?.en?.slug ?? pack2.article?.es?.slug ?? "";
+  const translationKey = translationKeyOf(pack2, brand);
   if (pack2.article && mode("blog") !== "off") {
-    for (const lang of ["en", "es"]) {
+    for (const lang of brand.languages.blog) {
       const version = pack2.article[lang];
       if (!version) continue;
       const frontMatter = [
@@ -4886,14 +4999,14 @@ ${withScreenshot(version.markdown.trim(), screenshots[0], projectLabel(pack2, la
   }
   if (pack2.devto && mode("devto") !== "off") {
     files.push(
-      channelDraft(dir, "devto", mode("devto"), `Republishes the English article with its canonical URL set to ${articleLink(pack2, brand.site, "en")}.
+      channelDraft(dir, "devto", mode("devto"), `Republishes the ${republished(pack2, brand)} article with its canonical URL set to ${articleLink(pack2, brand.site, leadLanguage(pack2.article, brand))}.
 
 Tags: ${pack2.devto.tags.map((t) => `\`${t}\``).join(", ")}`)
     );
   }
   if (pack2.hashnode && mode("hashnode") !== "off") {
     files.push(
-      channelDraft(dir, "hashnode", mode("hashnode"), `Republishes the English article with its original URL set to ${articleLink(pack2, brand.site, "en")}.
+      channelDraft(dir, "hashnode", mode("hashnode"), `Republishes the ${republished(pack2, brand)} article with its original URL set to ${articleLink(pack2, brand.site, leadLanguage(pack2.article, brand))}.
 
 Tags: ${pack2.hashnode.tags.map((t) => `\`${t}\``).join(", ")}`)
     );
@@ -4922,7 +5035,7 @@ Tags: ${pack2.hashnode.tags.map((t) => `\`${t}\``).join(", ")}`)
   if (pack2.instagram && mode("instagram") !== "off") {
     const ig = pack2.instagram;
     const slides = [
-      `Cover: ${pack2.article?.en?.title ?? pack2.project.name}. ${ig.summary}`,
+      `Cover: ${coverTitle(pack2, brand) ?? pack2.project.name}. ${ig.summary}`,
       ...hasDemo(config) ? ["The demo, as a video"] : [],
       ...ig.slides.map((s) => `${s.title}: ${s.text}`),
       "Closing: the full write-up is in my bio"
@@ -4954,7 +5067,7 @@ Tags: ${pack2.hashnode.tags.map((t) => `\`${t}\``).join(", ")}`)
     }
   }
   if (pack2.newsletter && mode("newsletter") !== "off") {
-    for (const lang of ["en", "es"]) {
+    for (const lang of newsletterLanguages(brand)) {
       const issue = pack2.newsletter[lang];
       if (issue) {
         files.push(channelDraft(dir, "newsletter", mode("newsletter"), issueDraftBody(issue), lang));
@@ -5013,9 +5126,10 @@ function reviewSections(pack2, config) {
     channels3
   ];
 }
+var SCREENSHOT = { en: "screenshot", es: "captura de pantalla", fr: "capture d\u2019\xE9cran", de: "Bildschirmfoto", it: "screenshot", pt: "captura de ecr\xE3" };
 function withScreenshot(markdown, screenshot, project, lang) {
   if (!screenshot || markdown.includes(screenshot)) return markdown;
-  const alt = lang === "es" ? `${project}, captura de pantalla` : `${project}, screenshot`;
+  const alt = `${project}, ${SCREENSHOT[lang] ?? SCREENSHOT.en}`;
   const end = markdown.indexOf("\n\n");
   const image2 = `![${alt}](${screenshot})`;
   return end === -1 ? `${markdown}
@@ -9797,9 +9911,10 @@ function fakePack(launch2, config, brand) {
   const version = launch2.ref.startsWith("public:") || launch2.ref.startsWith("article:") ? void 0 : launch2.ref;
   const channels3 = new Set(activeChannels(config));
   const title = `${name2}${version ? ` ${version}` : ""}`;
-  const url = (lang2, via) => `${brand.site}/${lang2}/${slug3}-${lang2 === "en" ? "launch" : "lanzamiento"}/?ref=${via}`;
+  const articleSlug2 = (lang2) => `${slug3}-${lang2 === "es" ? "lanzamiento" : "launch"}`;
+  const lead = brand.languages.blog.includes("en") ? "en" : brand.languages.blog[0] ?? "en";
+  const url = (lang2, via) => `${brand.site}/${lang2}/${articleSlug2(lang2)}/?ref=${via}`;
   const languages = new Set(brand.languages.blog);
-  if (channels3.has("devto") || channels3.has("hashnode")) languages.add("en");
   const needsArticle = channels3.has("blog") || channels3.has("devto") || channels3.has("hashnode") || channels3.has("linkedin");
   const article = needsArticle ? {
     tags: ["test"],
@@ -9807,8 +9922,8 @@ function fakePack(launch2, config, brand) {
       [...languages].map((lang2) => [
         lang2,
         {
-          slug: `${slug3}-${lang2 === "en" ? "launch" : "lanzamiento"}`,
-          title: lang2 === "en" ? `${title}: a test launch` : `${title}: un lanzamiento de prueba`,
+          slug: articleSlug2(lang2),
+          title: lang2 === "es" ? `${title}: un lanzamiento de prueba` : `${title}: a test launch`,
           description: FAKE_NOTICE,
           markdown: `${FAKE_NOTICE}
 
@@ -9833,13 +9948,13 @@ The project at https://github.com/${launch2.repo}${version ? `, release ${versio
     ...channels3.has("hashnode") && { hashnode: { tags: ["test"] } },
     ...channels3.has("bluesky") && { bluesky: { lang, text: `${title} (test) ${url(lang, "bluesky")}` } },
     ...channels3.has("mastodon") && { mastodon: { lang, text: `${short} ${url(lang, "mastodon")}` } },
-    ...channels3.has("telegram") && { telegram: { text: `${short} ${url("en", "telegram")}` } },
-    ...channels3.has("discord") && { discord: { text: `${short} ${url("en", "discord")}` } },
-    ...channels3.has("threads") && { threads: { text: `${title} (test) ${url("en", "threads")}` } },
+    ...channels3.has("telegram") && { telegram: { text: `${short} ${url(lead, "telegram")}` } },
+    ...channels3.has("discord") && { discord: { text: `${short} ${url(lead, "discord")}` } },
+    ...channels3.has("threads") && { threads: { text: `${title} (test) ${url(lead, "threads")}` } },
     ...channels3.has("linkedin") && { linkedin: { text: short } },
     ...channels3.has("githubDiscussions") && { githubDiscussions: { title: `${title} (test)`, body: `${FAKE_NOTICE}
 
-${url("en", "github")}` } },
+${url(lead, "github")}` } },
     ...channels3.has("instagram") && {
       instagram: {
         caption: `${title}. Link in bio. #test`,
@@ -9853,7 +9968,7 @@ ${url("en", "github")}` } },
     ...channels3.has("reddit") && { reddit: config.reddit.subreddits.map((subreddit) => ({ subreddit, title: `${title} (test)`, body: FAKE_NOTICE })) },
     ...channels3.has("newsletter") && brand.newsletter && {
       newsletter: Object.fromEntries(
-        Object.keys(brand.newsletter.lists).map((l) => [l, { subject: `${title} (test)`, previewText: "A placeholder issue", markdown: FAKE_NOTICE }])
+        newsletterLanguages(brand).map((l) => [l, { subject: `${title} (test)`, previewText: "A placeholder issue", markdown: FAKE_NOTICE }])
       )
     }
   };
@@ -11708,8 +11823,8 @@ async function buildAssets(options) {
     {
       project: pack2.project.name,
       look,
-      title: pack2.article?.en?.title ?? pack2.project.name,
-      pitch: pack2.article?.en?.description ?? pack2.analysis.summary,
+      title: imageVersion(pack2.article, brand)?.title ?? pack2.project.name,
+      pitch: imageVersion(pack2.article, brand)?.description ?? pack2.analysis.summary,
       version: pack2.project.version,
       author: brand.displayName,
       site: new URL(brand.site).host
@@ -11736,7 +11851,7 @@ async function buildCarousel(options, dir, look, listed, recorded) {
   const http2 = options.fetch ?? globalThis.fetch;
   const project = projectLabel(pack2, launch2);
   const site = new URL(brand.site).host;
-  const title = pack2.article?.en?.title ?? pack2.project.name;
+  const title = imageVersion(pack2.article, brand)?.title ?? pack2.project.name;
   const cover = listed ?? await image(http2, `${brand.site}${look.cover ?? coverPath(launch2)}`) ?? {
     bytes: await renderIllustration(look),
     mimeType: "image/png"
@@ -11869,12 +11984,15 @@ function promptVariables(brand, config, extra = {}) {
   return {
     site: brand.site,
     blogLanguages: brand.languages.blog.join(" and "),
-    newsletterLanguages: Object.keys(brand.newsletter?.lists ?? { en: 1 }).join(" and "),
+    newsletterLanguages: newsletterLanguages(brand).join(" and "),
     redditTarget: subs.length > 0 ? `one post for each of r/${subs.join(", r/")}` : "one or two posts, each naming a fitting subreddit",
     demoNote: hasDemo(config) ? " (the demo plays as its second slide)" : "",
     otherLanguages: "the other blog languages",
-    // The card shares the article in this language, so the post is written in it too
-    linkedinLanguage: brand.languages.linkedin && brand.languages.blog.includes(brand.languages.linkedin) ? languageName(brand.languages.linkedin) : "English",
+    // The card shares the article in this language, so the post is written in it too; unset, the lead
+    // article's: English, or the primary language for a blog without English
+    linkedinLanguage: languageName(
+      brand.languages.linkedin && brand.languages.blog.includes(brand.languages.linkedin) ? brand.languages.linkedin : brand.languages.blog.includes("en") ? "en" : brand.languages.blog[0] ?? "en"
+    ),
     ...Object.fromEntries(Object.entries(LIMITS).map(([key, value]) => [`limit.${key}`, String(value)])),
     ...extra
   };
@@ -12276,7 +12394,7 @@ async function draftFromSources(launch2, config, brand, deps, options, configTex
   const { prompt, system } = buildSourcesPrompt(launch2, effective, brand, { title, index: bundle.index, ...release && { release } }, texts);
   let pack2;
   try {
-    const result = await deps.aiRunner.run(SOURCES_PACK_TASK, {
+    const result = await deps.aiRunner.run(packTaskFor(SOURCES_PACK_TASK, packLanguages(brand)), {
       system,
       prompt,
       repo: { name: bundle.primary?.repo ?? `launch-${launch2.id}`, ref: launch2.ref, hostDir: bundle.hostDir, archive: () => s.archive(bundle.hostDir) }
@@ -12323,7 +12441,7 @@ async function generatePack(options) {
   const { prompt, system } = buildPrompt(launch2, config, brand, { prompts: options.prompts, tone: options.tone, releaseNotes: options.releaseNotes });
   let result;
   try {
-    result = await runner.run(AI_TASK_DEFINITIONS.pack, {
+    result = await runner.run(packTaskFor(AI_TASK_DEFINITIONS.pack, packLanguages(brand)), {
       system,
       prompt,
       repo: { name: launch2.repo, ref: options.ref, hostDir: checkout2.hostPath },
@@ -12492,10 +12610,13 @@ function claimArticle(input, brand, deps) {
 }
 async function generateArticlePack(input, brand, deps) {
   const config = articleConfig(brand, input.channels);
+  if (!brand.languages.blog.includes(input.lang)) {
+    return { ok: false, problems: [`the blog is not written in ${languageName(input.lang)} (${input.lang}); brand.yml's languages.blog is ${brand.languages.blog.join(", ")}`] };
+  }
   let pack2;
   try {
     const { prompt, system } = buildArticlePrompt(input, brand, config, deps.launchesRepo, await aiTextsOf(deps));
-    const result = await deps.aiRunner.run(AI_TASK_DEFINITIONS.article, { system, prompt });
+    const result = await deps.aiRunner.run(packTaskFor(AI_TASK_DEFINITIONS.article, packLanguages(brand)), { system, prompt });
     pack2 = result.output;
   } catch (error) {
     return { ok: false, problems: [error instanceof Error ? error.message : String(error)] };
@@ -13362,10 +13483,9 @@ import { isMap, isScalar, parseDocument as parseDocument4 } from "yaml";
 import { parseDocument as parseDocument3 } from "yaml";
 var MAIN_PIECE = "post";
 var RELEASE_NOTES = "releaseNotes";
-var ARTICLE = /^src\/content\/posts\/(en|es)\/[^/]+\.md$/;
 function storedFile(launch2, path2) {
   const dir = launchDir(launch2);
-  const article = ARTICLE.exec(path2);
+  const article = ARTICLE_PATH.exec(path2);
   if (article) return { kind: "draft", channel: "blog", piece: `article:${article[1]}` };
   if (path2 === `${dir}/pack.json`) return { kind: "pack" };
   if (path2 === `${dir}/launch.yml`) return { kind: "channels" };
@@ -13708,8 +13828,8 @@ async function publishLaunch(launch2, brand, deps) {
   if ("state" in content) return content;
   const { pack: pack2, config, read, waits } = content;
   const dir = launchDir(launch2);
-  const lead = pack2.article?.en ? "en" : "es";
-  const slug3 = pack2.article?.[lead]?.slug;
+  const lead = leadLanguage(pack2.article, brand);
+  const slug3 = lead && pack2.article?.[lead]?.slug;
   const articleUrl2 = articleLink(pack2, brand.site, lead);
   const channels3 = (deps.channels ?? CHANNEL_DEFINITIONS).filter((d) => d.publishedBy === "engine");
   const modeOf = (d) => config.publishing[d.id] ?? d.defaultMode;
@@ -13719,7 +13839,7 @@ async function publishLaunch(launch2, brand, deps) {
     if (blogWaits) return { state: "waiting", launch: launch2, reason: `the article ${blogWaits}; every channel links it` };
     if (blogOn || channels3.some((d) => modeOf(d) !== "off" && !waits.has(d.id))) {
       try {
-        await app.publishSite(launch2, { article: blogOn, title: pack2.article?.[lead]?.title ?? pack2.project.name });
+        await app.publishSite(launch2, { article: blogOn, title: (lead && pack2.article?.[lead]?.title) ?? pack2.project.name });
       } catch (error) {
         return { state: "waiting", launch: launch2, reason: `the article and its media could not be committed to ${deps.launchesRepo}, tried again shortly: ${error instanceof Error ? error.message : String(error)}` };
       }
@@ -13735,7 +13855,7 @@ async function publishLaunch(launch2, brand, deps) {
     if ((await registry.posts.posts(launch2.id, { channel: "blog" })).length === 0 && deps.search) {
       await resubmitSitemap(registry, brand.site, deps.search, /* @__PURE__ */ new Date(), true).catch(() => false);
     }
-    for (const lang of ["en", "es"]) {
+    for (const lang of brand.languages.blog) {
       const piece15 = pack2.article?.[lang];
       if (!piece15) continue;
       await registry.posts.recordPost({ launchId: launch2.id, channel: "blog", kind: `article:${lang}`, url: articleLink(pack2, brand.site, lang, lead), externalId: piece15.slug });
@@ -13743,8 +13863,9 @@ async function publishLaunch(launch2, brand, deps) {
   }
   const article = slug3 ? await read(`src/content/posts/${lead}/${slug3}.md`) : void 0;
   const { data: front, body: articleBody } = article ? parseFrontMatter(article) : { data: {}, body: "" };
-  const title = typeof front.title === "string" ? front.title : pack2.article?.en?.title ?? pack2.project.name;
-  const description2 = typeof front.description === "string" ? front.description : pack2.article?.en?.description ?? pack2.analysis.summary;
+  const leadPiece = lead ? pack2.article?.[lead] : void 0;
+  const title = typeof front.title === "string" ? front.title : leadPiece?.title ?? pack2.project.name;
+  const description2 = typeof front.description === "string" ? front.description : leadPiece?.description ?? pack2.analysis.summary;
   const ogJpegUrl = `${brand.site}${mediaPath(launch2, "og.jpg")}`;
   let ogJpeg;
   const image2 = async () => {
@@ -13757,7 +13878,7 @@ async function publishLaunch(launch2, brand, deps) {
   };
   const linkedinLang = brand.languages.linkedin && pack2.article?.[brand.languages.linkedin] ? brand.languages.linkedin : lead;
   const linkedinCard = async () => {
-    if (linkedinLang === lead) return { url: articleUrl2, title, description: description2 };
+    if (!linkedinLang || linkedinLang === lead) return { url: articleUrl2, title, description: description2 };
     const piece15 = pack2.article[linkedinLang];
     const { data } = parseFrontMatter(await read(`src/content/posts/${linkedinLang}/${piece15.slug}.md`) ?? "");
     return {
@@ -13769,7 +13890,7 @@ async function publishLaunch(launch2, brand, deps) {
   const tracking = { site: brand.site, campaign: campaignOf(launch2) };
   const accountOf = (channel2) => deps.accounts?.[channel2] ?? null;
   const now = deps.now?.() ?? /* @__PURE__ */ new Date();
-  const issueLanguages = ["en", "es"].filter((lang) => brand.newsletter?.lists[lang] && pack2.newsletter?.[lang]);
+  const issueLanguages = newsletterLanguages(brand).filter((lang) => brand.newsletter?.lists[lang] && pack2.newsletter?.[lang]);
   const subreddits = (pack2.reddit ?? []).map((r) => r.subreddit);
   const builtInDone = (pieces3, channel2) => channel2 === "newsletter" ? issueLanguages.length > 0 && issueLanguages.every((lang) => pieces3.some((p) => p.channel === channel2 && p.kind === `issue:${lang}`)) : channel2 === "reddit" ? subreddits.length > 0 && subreddits.every((sub) => pieces3.some((p) => p.channel === "reddit" && p.kind === redditKind(sub))) : pieces3.some((p) => p.channel === channel2 && p.kind === "post" && p.status !== "scheduled");
   const later = (pieces3, channel2) => pieces3.map((p) => p.channel === channel2 ? waitsUntil(p, now) : void 0).find((at) => at !== void 0);
@@ -13933,7 +14054,7 @@ ${link}`;
       let sent = 0;
       const empty = [];
       const projects = await loadProjects(github, deps.launchesRepo);
-      for (const lang of ["en", "es"]) {
+      for (const lang of newsletterLanguages(brand)) {
         const listId = settings2.lists[lang];
         const fromPack = pack2.newsletter[lang];
         if (!listId || !fromPack) continue;
@@ -14213,7 +14334,7 @@ async function demoCheck(repo3, at, demo, site, github) {
 
 // ../../packages/engine/src/review.ts
 function describe2(path2, dir) {
-  const article = /^src\/content\/posts\/(en|es)\//.exec(path2);
+  const article = /^src\/content\/posts\/([a-z]{2})\//.exec(path2);
   if (article) return { path: path2, label: `Article (${article[1]})`, kind: "article" };
   const name2 = path2.split("/").at(-1) ?? path2;
   const channel2 = path2.startsWith(`${dir}/`) ? draftOf(name2) : void 0;
@@ -14574,7 +14695,8 @@ function launchReplyContext(deps) {
   return async (launch2) => {
     const pack2 = await deps.stored.pack(launch2).catch(() => void 0);
     const postText = {};
-    const english = pack2?.article?.en ?? pack2?.article?.es;
+    const lead = leadLanguage(pack2?.article);
+    const english = lead ? pack2?.article?.[lead] : void 0;
     for (const channel2 of COMMENT_CHANNELS) {
       const definition = channelDefinition(channel2);
       const piece15 = pack2?.[definition.pack.key];
@@ -15107,7 +15229,7 @@ var PRIVATE_UNTIL_AUDIT = "private until Google audits the project";
 var youtubePrivacyKey = (postId2) => `youtube-privacy:${postId2}`;
 var youtubeKind = (part) => `post:${part}`;
 var FORMAT = { short: "short", video: "horizontal" };
-var CAPTION_NAME = { en: "English", es: "Espa\xF1ol" };
+var CAPTION_NAME = { en: "English", es: "Espa\xF1ol", fr: "Fran\xE7ais", de: "Deutsch", it: "Italiano", pt: "Portugu\xEAs" };
 var DESCRIPTION_MAX = 5e3;
 async function fetched(context, file) {
   const response = await context.fetch(context.mediaUrl(file)).catch(() => void 0);
@@ -15142,7 +15264,8 @@ async function launchMedia(context, work) {
   return { cover, screenshots, demo };
 }
 function articleImages(context) {
-  const markdown = context.pack.article?.en?.markdown ?? context.pack.article?.es?.markdown ?? "";
+  const lead = leadLanguage(context.pack.article, context.brand);
+  const markdown = (lead && context.pack.article?.[lead]?.markdown) ?? "";
   const site = new URL(context.articleUrl);
   const urls = [];
   for (const match of markdown.matchAll(/!\[[^\]]*\]\(\s*<?([^)\s>]+)>?/g)) {
@@ -15230,7 +15353,7 @@ function youtubeStrategy(options = {}) {
                 bytes: new Uint8Array(await readFile5(output)),
                 short: part === "short",
                 privacy: "public",
-                captions: [{ lang: video.lang, name: CAPTION_NAME[video.lang], srt: rendered.srt }],
+                captions: [{ lang: video.lang, name: CAPTION_NAME[video.lang] ?? languageName(video.lang), srt: rendered.srt }],
                 thumbnail: media2.cover
               };
             } catch (error) {
@@ -15290,6 +15413,9 @@ var LocalLock = class {
 };
 
 // ../../packages/engine/src/services/launches.ts
+function notBrandLanguage(lang, brand) {
+  return `The blog is not written in ${languageName(lang)} (${lang}): brand.yml's languages.blog is ${brand.languages.blog.join(", ")}`;
+}
 var LaunchRefused = class extends Refused {
   launch;
   constructor(reason, message8, launch2) {
@@ -15350,6 +15476,7 @@ var LaunchService = class {
   }
   /** Claims an article written in the app; one whose draft failed can be written again under the same title */
   async claimArticle(input, brand) {
+    if (!brand.languages.blog.includes(input.lang)) throw new LaunchRefused("invalid", notBrandLanguage(input.lang, brand));
     const claim = await claimArticle(input, brand, this.#deps.claims);
     if (!claim.claimed && claim.launch.status !== "failed") throw new LaunchRefused("launched", `An article titled like this exists already (${claim.launch.status}). Change the title.`, claim.launch);
     return claim.launch;
@@ -21691,7 +21818,8 @@ merging it publishes the article and every channel you turned on.
   --brand <id>                   The brand's id (default: your login, lowercase)
   --name <display name>          Who the launches speak for (default: git's user.name)
   --site <https://\u2026>             Your blog's address, where articles are published
-  --languages <en|es|en,es>      The blog's languages (default: en)
+  --languages <codes>            The blog's languages, as ISO 639-1 codes, the primary first,
+                                 such as en, en,es or de (default: en)
   --tone "<text>"                How the AI writes for you, in a few sentences (brand.yml's tone;
                                  without it the drafts are in a generic voice until you fill it)
   --ai <anthropic|openai>        The AI the content is written with (default: anthropic)
@@ -22043,7 +22171,7 @@ ${SETUP_USAGE}`);
     const launchesRepo = await ask("Your launches repo (your blog), owner/name", parsed.launchesRepo, owner ? `${owner}/launches` : void 0);
     const site = await ask("Your blog\u2019s address, https://\u2026", parsed.site, owner ? `https://${owner.toLowerCase()}.github.io` : void 0);
     const name2 = await ask("Who the launches speak for", parsed.name, gitUserName(cwd) ?? owner);
-    const languages = await ask("The blog\u2019s languages (en, es or en,es)", parsed.languages, "en");
+    const languages = await ask("The blog\u2019s languages (ISO 639-1 codes, the primary first: en, es, en,es, de\u2026)", parsed.languages, "en");
     if (prompt && parsed.tone === void 0) {
       log("");
       for (const line of TONE_HELP) log(line);
@@ -22766,7 +22894,7 @@ var tools8 = [
     input: z23.object({
       title: z23.string().min(1).max(200).describe("The article's title"),
       markdown: z23.string().min(1).max(2e5).describe("The body in Markdown, without a top-level heading. An image is ![what it shows](/articles/<slug>/<name>), its alt text required (at most 140 characters)"),
-      lang: z23.enum(["en", "es"]).describe("The language it is written in"),
+      lang: z23.string().regex(/^[a-z]{2}$/, "an ISO 639-1 code: two lowercase letters").describe("The language it is written in: an ISO 639-1 code, one of the blog's (brand.yml's languages.blog)"),
       channels: z23.array(channel).optional().describe("Channels to announce it on, besides the blog"),
       images: z23.array(z23.object({ sha256: z23.string().regex(/^[0-9a-f]{64}$/), name: z23.string().describe("The articleName upload_media answered") })).max(30).optional().describe("Images uploaded with upload_media that the body links by name; they go to the article's folder on the site"),
       direct: z23.boolean().optional().describe("Approve the drafts as written and publish at once, without a review; false by default"),
@@ -23143,7 +23271,7 @@ var tools13 = [
     operations: ["launchFromSources"],
     input: z28.object({
       title: z28.string().min(1).max(200).describe("The launch's title"),
-      lang: z28.enum(["en", "es"]).optional().describe("The language of the title and the user's text; en by default"),
+      lang: z28.string().regex(/^[a-z]{2}$/, "an ISO 639-1 code: two lowercase letters").optional().describe("The language of the title and the user's text: an ISO 639-1 code, one of the blog's; its primary language by default"),
       channels: z28.array(channel).optional().describe("Channels to announce it on besides the blog, for a launch with no repo; a repo's launch.yml decides for one with a primary repo"),
       sources: z28.array(source).min(1).max(12).describe("What the launch is made from; each one's `kind` is text, url, repo or media")
     }),
@@ -23161,7 +23289,7 @@ var tools13 = [
             return { kind: s.kind, sha256: s.sha256, ...s.name !== void 0 && { name: s.name }, ...s.alt !== void 0 && { alt: s.alt } };
         }
       });
-      const body = { title: args.title, lang: args.lang ?? "en", channels: args.channels ?? [], sources };
+      const body = { title: args.title, ...args.lang && { lang: args.lang }, channels: args.channels ?? [], sources };
       return accepted(await api.call("POST", "/launches/sources", { body }), `Launching "${args.title}" from ${sources.length} source${sources.length === 1 ? "" : "s"}`);
     }
   }),
@@ -23516,7 +23644,7 @@ Then summarise: a table with one row per channel (its posts, the launch's views,
       argsSchema: z30.object({
         repo: z30.string().describe("owner/name"),
         ref: z30.string().optional().describe("The release tag"),
-        lang: z30.enum(["en", "es"]).optional().describe("The article's language; English by default")
+        lang: z30.string().regex(/^[a-z]{2}$/, "an ISO 639-1 code: two lowercase letters").optional().describe("The article's language, one of the blog's (brand.yml's languages.blog); its primary language by default")
       })
     },
     ({ repo: repo3, ref, lang }) => ({
@@ -23525,11 +23653,11 @@ Then summarise: a table with one row per channel (its posts, the launch's views,
           role: "user",
           content: {
             type: "text",
-            text: `Write an article announcing ${repo3}${ref ? ` ${ref}` : ""} in ${LANGUAGE_NAMES[lang ?? "en"]}.
+            text: `Write an article announcing ${repo3}${ref ? ` ${ref}` : ""} in ${lang ? languageName(lang) : "the blog\u2019s primary language (the first of brand.yml\u2019s languages.blog)"}.
 - Tell only what the release really ships: read the repo's code and release notes, and keep anything planned or only documented clearly apart from what is implemented.
 - Open with a paragraph that answers what the project is and what changed; use questions as section headings; no top-level heading (the title is separate).
 - Show me the title and the Markdown and wait for my changes.
-- When I approve it, call write_article with lang "${lang ?? "en"}" and the channels I name (without direct, so its drafts wait for my review), then follow the job with list_jobs and summarise the drafts from get_launch.`
+- When I approve it, call write_article with lang ${lang ? `"${lang}"` : "set to that language\u2019s code"} and the channels I name (without direct, so its drafts wait for my review), then follow the job with list_jobs and summarise the drafts from get_launch.`
           }
         }
       ]
